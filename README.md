@@ -1,5 +1,7 @@
 # Fly64
 
+See: https://x.com/barrelshifter/status/2097004115826200898
+
 The fly brain model got popular on social media. I decided to try to:
 
 - Take the fly brain model from here: http://male-cns.janelia.org
