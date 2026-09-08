@@ -30,7 +30,7 @@
 <header><div><h1>Fly64 Neural Observatory</h1><div id="label">loading model…</div></div><div id="status" class="live">● connecting</div></header>
 <main id="grid">
     <section class="panel"><div class="title">Neural state · all cells</div><canvas id="brain"></canvas><footer>Measured soma positions + deterministic missing-position layout · modeled dynamics</footer></section>
-  <section class="panel"><div class="title">Fly retinal input · SM64 framebuffer</div><canvas id="retina" width="64" height="48"></canvas></section>
+  <section class="panel"><div class="title">Fly eyes · first person · 270°</div><canvas id="retina" width="256" height="128"></canvas><footer>Left eye / right eye · separate from your camera<br>Approximate optics · RGB, no UV · <span id="eyeTiming">waiting for game</span></footer></section>
   <section class="panel"><div class="title">Spike density · 2 s · all cells binned</div><canvas id="raster"></canvas><div id="rates"></div></section>
   <section class="panel" id="telemetry"><div class="title">Decoded motor state</div>
     <div class="warning">Engineered dynamics and motor mapping; not validated fly physiology.<div id="applied">Game acknowledgement pending…</div></div>
@@ -52,7 +52,7 @@ function shader(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);g
 function initGL(pos){positions=pos;program=gl.createProgram();gl.attachShader(program,shader(gl.VERTEX_SHADER,`attribute vec3 p;attribute float a;uniform float t;uniform float aspect;varying float v;void main(){float c=cos(t),s=sin(t);vec3 q=vec3(c*p.x+s*p.z,p.y,-s*p.x+c*p.z);gl_Position=vec4(q.x*.68/aspect,q.y*.68,q.z*.08,1.0);v=a;gl_PointSize=1.0+1.5*a;}`));gl.attachShader(program,shader(gl.FRAGMENT_SHADER,`precision mediump float;varying float v;void main(){float d=length(gl_PointCoord-.5);if(d>.5)discard;gl_FragColor=mix(vec4(.08,.55,.55,.42),vec4(1.,.58,.18,1.),smoothstep(.4,1.,v));}`));gl.linkProgram(program);gl.useProgram(program);posBuf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,posBuf);gl.bufferData(gl.ARRAY_BUFFER,pos,gl.STATIC_DRAW);let l=gl.getAttribLocation(program,'p');gl.enableVertexAttribArray(l);gl.vertexAttribPointer(l,3,gl.FLOAT,false,0,0);actBuf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,actBuf);gl.bufferData(gl.ARRAY_BUFFER,N,gl.DYNAMIC_DRAW);l=gl.getAttribLocation(program,'a');gl.enableVertexAttribArray(l);gl.vertexAttribPointer(l,1,gl.UNSIGNED_BYTE,true,0,0);requestAnimationFrame(drawBrain)}
 function drawBrain(now){const d=devicePixelRatio||1,w=brain.clientWidth*d,h=brain.clientHeight*d;if(brain.width!==w||brain.height!==h){brain.width=w;brain.height=h}gl.viewport(0,0,w,h);gl.clearColor(.02,.05,.06,1);gl.clear(gl.COLOR_BUFFER_BIT);gl.useProgram(program);gl.uniform1f(gl.getUniformLocation(program,'t'),(now-start)*.00012);gl.uniform1f(gl.getUniformLocation(program,'aspect'),w/h);gl.bindBuffer(gl.ARRAY_BUFFER,actBuf);gl.bufferSubData(gl.ARRAY_BUFFER,0,activity);gl.drawArrays(gl.POINTS,0,N);requestAnimationFrame(drawBrain)}
 fetch('/positions.bin').then(r=>r.arrayBuffer()).then(b=>initGL(new Float32Array(b)));
-const retina=document.querySelector('#retina'),rx=retina.getContext('2d'),image=rx.createImageData(64,48);
+const retina=document.querySelector('#retina'),rx=retina.getContext('2d'),image=rx.createImageData(256,128);
 const raster=document.querySelector('#raster'),rc=raster.getContext('2d');let columns=[];
 function drawRaster(){
  const d=devicePixelRatio||1,w=raster.clientWidth*d,h=raster.clientHeight*d;
@@ -71,7 +71,7 @@ function connect(){
  ws.onclose=()=>{statusEl.textContent='● disconnected';setTimeout(connect,800)};
  ws.onmessage=e=>{
   const b=e.data,v=new DataView(b);
-  if(String.fromCharCode(...new Uint8Array(b,0,4))!=='F64D')return;
+  if(String.fromCharCode(...new Uint8Array(b,0,4))!=='F642')return;
   const x=v.getInt8(16),y=v.getInt8(17),jump=v.getUint8(18),rtf=v.getFloat32(19,true),lat=v.getFloat32(23,true),drop=v.getUint32(27,true),n=v.getUint32(31,true),ns=v.getUint32(35,true),w=v.getUint16(39,true),h=v.getUint16(41,true);
   let off=43,pix=new Uint8Array(b,off,w*h*3);off+=w*h*3;
   activity=new Uint8Array(b,off,n);off+=n;
@@ -91,7 +91,7 @@ function connect(){
   document.querySelector('#jump').classList.toggle('on',!!jump);
  };
 }connect();
-setInterval(async()=>{try{const s=await fetch('/bridge-status.json').then(r=>r.json());document.querySelector('#applied').textContent=s.state===1?`Game received: x ${s.x}, y ${s.y}${s.jump?' · A':''}`:['Neural control disabled','','STALE CONTROLLER — released','Packet rejected (torn)','GAME NOT CONNECTED'][s.state];}catch{}},250);
+setInterval(async()=>{try{const s=await fetch('/bridge-status.json').then(r=>r.json());document.querySelector('#eyeTiming').textContent=`six views ${s.render_ms.toFixed(1)} ms · frame ${s.game_frame}`;document.querySelector('#applied').textContent=s.state===1?`Game received: x ${s.x}, y ${s.y}${s.jump?' · A':''}`:['Neural control disabled','','STALE CONTROLLER — released','Packet rejected (torn)','GAME NOT CONNECTED'][s.state];}catch{}},250);
 </script>
 </body>
 </html>

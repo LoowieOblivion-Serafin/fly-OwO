@@ -3,7 +3,7 @@ import struct
 import subprocess
 import numpy as np
 from scipy import sparse
-from fly64.bridge import SharedBridge
+from fly64.bridge import SharedBridge, FRAME_BYTES, HEADER_SIZE
 from fly64.model import FlyModel
 from fly64.main import Replay
 from fly64.replay import verify
@@ -12,10 +12,10 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def test_torn_frames_return_last_good_frame(tmp_path):
     with SharedBridge(tmp_path / "bridge") as b:
-        b.write_frame(bytes([41]) * 9216)
+        b.write_frame(bytes([41]) * FRAME_BYTES)
         expected = b.read_frame()
         struct.pack_into("<I", b.mm, 12, 3)
-        b.mm[64:] = bytes([99]) * 9216
+        b.mm[HEADER_SIZE:] = bytes([99]) * FRAME_BYTES
         assert b.read_frame() == expected
 
 def test_signed_event_propagation_matches_dense():
@@ -31,24 +31,24 @@ def test_no_visual_motor_shortcut():
     a.w = sparse.csc_matrix((a.n,a.n),dtype=np.float32)
     b.w = a.w.copy()
     for i in range(50):
-        ca, _ = a.step(np.zeros((48,64,3),np.uint8))
-        cb, _ = b.step(np.full((48,64,3),255,np.uint8))
+        ca, _ = a.step(np.zeros((256,384,3),np.uint8))
+        cb, _ = b.step(np.full((256,384,3),255,np.uint8))
         assert ca == cb
 
 def test_bilateral_decoder_and_jump():
     m = FlyModel(demo=True)
     m.v[m.turn_right] = 1.5
     m.v[m.jump_nodes] = 1.5
-    control, _ = m.step(np.zeros((48,64,3),np.uint8),0)
+    control, _ = m.step(np.zeros((256,384,3),np.uint8),0)
     assert control.x > 0 and control.jump
     m.v[m.jump_nodes] = 1.5
-    assert not m.step(np.zeros((48,64,3),np.uint8),.1)[0].jump
+    assert not m.step(np.zeros((256,384,3),np.uint8),.1)[0].jump
 
 def test_replay_all_ticks(tmp_path):
     m = FlyModel(demo=True, seed=23)
     r = Replay(tmp_path / "test.npz", 23, True)
     for i in range(30):
-        frame = np.full((48,64,3),i*7,np.uint8)
+        frame = np.full((256,384,3),i*7,np.uint8)
         c, s = m.step(frame, i*.02)
         r.add(i*.02, frame, c, s)
     r.close()

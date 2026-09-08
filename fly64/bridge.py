@@ -8,13 +8,13 @@ import ctypes
 import sys
 from pathlib import Path
 
-MAGIC = b"FLY64V1\0"
-WIDTH = 64
-HEIGHT = 48
+MAGIC = b"FLY64V2\0"
+WIDTH = 384
+HEIGHT = 256
 CHANNELS = 3
 FRAME_BYTES = WIDTH * HEIGHT * CHANNELS
 HEADER = struct.Struct("<8sIIIIQbbHI")
-HEADER_SIZE = 64
+HEADER_SIZE = 128
 FILE_SIZE = HEADER_SIZE + FRAME_BYTES
 A_BUTTON = 0x8000
 # Explicit hardware fences for cross-process seqlocks on Apple Silicon.
@@ -41,15 +41,17 @@ class SharedBridge:
         self._file = os.fdopen(fd, "r+b", buffering=0)
         self.mm = mmap.mmap(self._file.fileno(), FILE_SIZE)
         self._last_frame = (0, bytes(FRAME_BYTES))
+        self.frame_metadata = dict(pose=[0., 0., 0., 0.], game_frame=0, render_ms=0.)
         if create:
+            self.mm[:HEADER_SIZE] = bytes(HEADER_SIZE)
             self._write_header(0, 0, time.clock_gettime_ns(time.CLOCK_MONOTONIC), 0, 0, 0, 1)
-        elif self.mm[:8] != MAGIC or struct.unpack_from("<I", self.mm, 8)[0] != 1:
+        elif self.mm[:8] != MAGIC or struct.unpack_from("<I", self.mm, 8)[0] != 2:
             self.close()
             raise ValueError("incompatible Fly64 bridge")
 
     def _write_header(self, frame_seq, control_seq, heartbeat_ns, x, y, buttons, enabled):
         self.mm[: HEADER.size] = HEADER.pack(
-            MAGIC, 1, frame_seq, control_seq, enabled, heartbeat_ns, x, y, buttons, 0
+            MAGIC, 2, frame_seq, control_seq, enabled, heartbeat_ns, x, y, buttons, 0
         )
 
     def read_frame(self) -> tuple[int, bytes]:
@@ -57,10 +59,12 @@ class SharedBridge:
             before = struct.unpack_from("<I", self.mm, 12)[0]
             _memory_barrier()
             pixels = self.mm[HEADER_SIZE : HEADER_SIZE + FRAME_BYTES]
+            pose = struct.unpack_from("<4fIf", self.mm, 64)
             _memory_barrier()
             after = struct.unpack_from("<I", self.mm, 12)[0]
             if before == after and before % 2 == 0:
                 self._last_frame = before, pixels
+                self.frame_metadata = dict(pose=list(pose[:4]), game_frame=pose[4], render_ms=pose[5])
                 return self._last_frame
         return self._last_frame
 
@@ -102,7 +106,7 @@ class SharedBridge:
         seq, x, y, buttons, clock, state = struct.unpack_from("<IbbHQI", self.mm, 40)
         age = (time.clock_gettime_ns(time.CLOCK_MONOTONIC) - clock) / 1e6
         return dict(seq=seq, x=x, y=y, jump=bool(buttons & A_BUTTON),
-                    age_ms=age, state=state if age < 250 else 4)
+                    age_ms=age, state=state if age < 250 else 4, **self.frame_metadata)
 
     def close(self) -> None:
         self.mm.close()

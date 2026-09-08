@@ -4,9 +4,9 @@ from fly64.model import FlyModel
 
 
 def frame(left=0, right=0):
-    value = np.zeros((48, 64, 3), np.uint8)
-    value[:, :32] = left
-    value[:, 32:] = right
+    value = np.zeros((256, 384, 3), np.uint8)
+    value[:, :192] = left
+    value[:, 192:] = right
     return value
 
 

@@ -104,6 +104,13 @@ fi
 
 if [[ -n "${GAME_PID:-}" ]]; then
   while kill -0 "$SIM_PID" 2>/dev/null && kill -0 "$GAME_PID" 2>/dev/null; do sleep 0.5; done
+  GAME_EXIT=0
+  if ! kill -0 "$GAME_PID" 2>/dev/null; then
+    wait "$GAME_PID" || GAME_EXIT=$?
+  fi
   kill "$SIM_PID" 2>/dev/null || true
 fi
-wait "$SIM_PID"
+SIM_EXIT=0
+wait "$SIM_PID" || SIM_EXIT=$?
+if [[ "${GAME_EXIT:-0}" -ne 0 ]]; then exit "$GAME_EXIT"; fi
+exit "$SIM_EXIT"
