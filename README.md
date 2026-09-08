@@ -65,8 +65,8 @@ From your project folder, using the same ROM path:
 - **“Already running”:** close the existing game before starting another.
 - **“ROM validation failed”:** use an unmodified US `.z64` ROM.
 - **No dashboard:** open [the local dashboard](http://127.0.0.1:8765/) while the demo is running.
-- **Mario isn't moving:** click the game and check F8. Look for **“Game received”**
-  on the dashboard—not just the moving stick. Mario can also get stuck against walls.
+- **Mario isn't moving:** click the game and check F8. Look for **“Game: receiving”**
+  and the **sent → received** values. Mario can also get stuck against walls.
 
 ## Record a video
 
@@ -169,14 +169,29 @@ clock to check this.
 
 ### The dashboard
 
-It shows the picture, cell activity, spikes, and requested controls.
+Read it from top to bottom:
 
-“Game received” shows the controls the game accepted.
+1. **Eyes:** what the fly sees, and what changed since the last picture.
+2. **Controls:** which cell groups fired, which gates they crossed, and what
+   controls reached the game. All charts show the same ten seconds.
+3. **Brain:** a still map. Brighter cells fired more often. Pick a cell group
+   to see where its known locations are.
 
-The little fly is just an indicator of the controls, not a model of a fly's body.
+Hz means spikes per cell per second. The rate uses the last 13 steps, or 260 ms.
+The scales stay fixed. A small signal does not become bright just because
+everything else is quiet.
 
-Some cell positions come from measured data. Missing positions use a fallback
-layout. The colours show simulated activity.
+Gold ticks on the jump chart are requests. Cyan ticks mean the game reported A.
+Neither proves Mario left the ground. The game can ignore a jump in some states.
+
+Click **Freeze display** to read one moment. The game keeps running.
+Click **Resume live** to return; the charts start a fresh history.
+
+Missing cell locations are left off the map. Those cells still run in the model.
+Broad activity can come from the shared background drive, not just the eyes.
+The display shows signals and rules. It cannot show what a fly thinks.
+
+[Display design, signal definitions, and sources](docs/dashboard-design.md)
 
 ### Each step is saved
 

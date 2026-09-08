@@ -49,10 +49,10 @@ Python 3.12. Tested package versions are in `requirements-lock.txt`.
   **136 still use a deterministic within-eye proxy.** The cached 64×48 column
   coordinates now index angular directions, not the human framebuffer.
   Their angular registration is an approximation, not measured MaleCNS optics.
-- **140,638 measured soma/to-soma positions** are displayed; **26,062** missing
-  locations use a deterministic fallback layout. All cells are displayed, but
-  not all locations are measured. Rate summaries are by annotated **superclass**,
-  not anatomical neuropil ROI. The spike raster bins every received spike.
+- **140,638 measured soma/to-soma positions** are available to the stationary
+  dashboard map. **26,062** cells with missing locations are excluded from the
+  map, not the simulation. Rate summaries use actual input/decoder populations,
+  not invented anatomical regions. The cache's proxy coordinates are not drawn.
 - The model can collide, get stuck, or die. No star-completion or natural
   fly-behavior claim is made.
 
@@ -79,10 +79,10 @@ Neural updates target 50 Hz, framebuffer capture 10 Hz. Dashboard publishing
 drops from 10 to 5 Hz below 0.95 real-time factor. Neural updates and graph edges
 are never discarded to catch up. Real-time factor is simulated / elapsed time.
 
-The dashboard shows retinal input, membrane/spike activity, spike density,
-superclass rates, intent avatar and requested controls. **Game received**
-independently reports the game-applied controller state. A moving dashboard
-stick alone does not prove the game accepted it.
+The dashboard shows retinal input and inter-frame brightness change, named
+motor-pool rates and thresholds, requested versus observed game controls, and
+a stationary firing-rate map. See [signal definitions and display research](dashboard-design.md).
+A neural request alone does not prove the game accepted it.
 
 ## Bridge and replay
 
@@ -102,7 +102,8 @@ records timestamp, exact cubemap frame index, camera pose/game frame, spikes and
 requested controls; the index includes seed, dynamics parameters and the retinal
 calibration. Identical consecutive images are stored once per chunk, losslessly.
 Background compression bounds memory. Old v1 bridge/schema-2 replay data is
-rejected: record a new run. Dashboard magic F642 sends 256×128 paired-eye previews.
+rejected: record a new run. Dashboard magic F643 sends 256×128 paired-eye and
+change previews, rolling firing rates, and every intervening tick's telemetry.
 Replay verification recomputes every spike and controller output without SM64,
 on the same code/runtime. Floating-point ordering may differ across architectures.
 

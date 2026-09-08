@@ -91,6 +91,7 @@ class FlyModel:
         cost = self.rng.uniform(-1, 1, self.n)
         rad = np.sqrt(1 - cost * cost)
         self.positions = np.column_stack((rad * np.cos(phi), cost * 0.65, rad * np.sin(phi))).astype(np.float32)
+        self.position_measured = np.zeros(self.n, dtype=bool)
         self.regions = (np.arange(self.n) % 8).astype(np.uint8)
         self.region_names = np.array([f"fixture group {i}" for i in range(8)])
 
@@ -101,6 +102,7 @@ class FlyModel:
         for name in ("visual", "forward", "turn_left", "turn_right", "jump_nodes", "positions", "regions"):
             setattr(self, name, meta[name])
         self.region_names = meta["region_names"]
+        self.position_measured = meta["position_measured"]
         if "visual_pixels" in meta:
             self.visual_pixels = meta["visual_pixels"]
         else:

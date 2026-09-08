@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import struct
 import subprocess
 import tempfile
 import threading
@@ -22,16 +21,15 @@ from websockets.asyncio.server import serve
 
 from .bridge import CHANNELS, HEIGHT, WIDTH, SharedBridge
 from .model import FlyModel
-from .retina import BASES, CALIBRATION, PREVIEW_WIDTH, PREVIEW_HEIGHT
-
-DASH_HEADER = struct.Struct("<4sIdbbBffIIIHH")
-
+from .retina import BASES, CALIBRATION
+from .telemetry import Observatory
 
 class DashboardHTTP(BaseHTTPRequestHandler):
     html = b""
     positions = b""
     metadata = b"{}"
     bridge = None
+    assets = {}
 
     def do_GET(self):
         path = urlsplit(self.path).path
@@ -41,6 +39,8 @@ class DashboardHTTP(BaseHTTPRequestHandler):
             body, mime = self.positions, "application/octet-stream"
         elif path == "/metadata.json":
             body, mime = self.metadata, "application/json"
+        elif path in self.assets:
+            body, mime = self.assets[path]
         elif path == "/bridge-status.json" and self.bridge is not None:
             body, mime = json.dumps(self.bridge.game_status()).encode(), "application/json"
         else:
@@ -171,8 +171,15 @@ class Replay:
 def start_http(project: Path, model, port: int, ws_port: int) -> ThreadingHTTPServer:
     DashboardHTTP.html = (project / "web" / "index.html").read_bytes()
     DashboardHTTP.positions = model.positions.astype("<f4", copy=False).tobytes()
+    DashboardHTTP.assets = {
+        "/dashboard.js": ((project / "web/dashboard.js").read_bytes(), "text/javascript"),
+        "/dashboard.css": ((project / "web/dashboard.css").read_bytes(), "text/css"),
+        "/measured.bin": (model.position_measured.astype(np.uint8).tobytes(), "application/octet-stream"),
+    }
     DashboardHTTP.metadata = json.dumps(dict(n=model.n, ws=ws_port, label=model.label,
-        region_names=model.region_names.tolist(), retina=CALIBRATION)).encode()
+        region_names=model.region_names.tolist(), retina=CALIBRATION,
+        measured=int(model.position_measured.sum()),
+        groups={key: ids.tolist() for key, ids in Observatory(model).groups.items()})).encode()
     server = LocalHTTPServer(("127.0.0.1", port), DashboardHTTP)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
@@ -209,7 +216,7 @@ async def run(args) -> None:
     latest_control = None
     last_frame_seq = -1
     dropped = 0
-    pending_spikes = []
+    observatory = Observatory(model)
     pending_jump = False
     dash_seq = 0
 
@@ -238,7 +245,6 @@ async def run(args) -> None:
     log_path = args.record.with_suffix(".jsonl")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = log_path.open("w", buffering=1)
-    region_sizes = np.bincount(model.regions, minlength=len(model.region_names))
 
     try:
         next_tick = time.monotonic()
@@ -260,32 +266,22 @@ async def run(args) -> None:
             latest_control = control
             bridge.write_control(control.x, control.y, control.jump)
             replay.add((model.step_count - 1) * model.dt, frame, control, spikes, bridge.frame_metadata)
-            pending_spikes.append(spikes)
+            observatory.observe(frame, seq, control, spikes, bridge.game_status())
             pending_jump |= control.jump
             latency_ms = (time.monotonic() - tick_start) * 1000
             rtf = model.step_count * model.dt / max(time.monotonic() - started, .02)
 
             if tick_start - last_publish >= (0.2 if rtf < 0.95 else 0.1):
-                publish_ticks = len(pending_spikes)
-                all_spikes = np.concatenate(pending_spikes).astype("<u4")
-                pending_spikes.clear()
                 last_publish = tick_start
                 dash_seq += 1
-                activity = np.clip((np.clip(model.v, 0, 1) * 0.35 + model.activity * 0.65) * 255, 0, 255).astype(np.uint8)
-                header = DASH_HEADER.pack(
-                    b"F642", dash_seq, tick_start, control.x, control.y, int(pending_jump),
-                    rtf, latency_ms,
-                    dropped, model.n, len(all_spikes), PREVIEW_WIDTH, PREVIEW_HEIGHT,
-                )
-                rates = (np.bincount(model.regions[all_spikes], minlength=len(region_sizes)) /
-                         np.maximum(region_sizes * publish_ticks * model.dt, 1)).astype("<f4")
-                packet = header + model.retina.preview(frame).tobytes() + activity.tobytes() + all_spikes.tobytes() + rates.tobytes()
                 if packet_queue.full():
                     try:
                         packet_queue.get_nowait()
                         dropped += 1
                     except asyncio.QueueEmpty:
                         pass
+                packet = observatory.packet(dash_seq, rtf=rtf, latency_ms=latency_ms, dropped=dropped,
+                    rss_mb=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1e6)
                 packet_queue.put_nowait(packet)
                 log.write(json.dumps(dict(wall_s=tick_start-started, steps=model.step_count, rtf=rtf,
                     latency_ms=latency_ms, rss_mb=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1e6,
