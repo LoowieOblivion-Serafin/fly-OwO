@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Convenience wrapper for Linux/macOS: ./run-flysonic [options]
+exec python3 "$(cd "$(dirname "$0")" && pwd)/run_flysonic.py" "$@"

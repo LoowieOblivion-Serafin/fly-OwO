@@ -1,4 +1,4 @@
-"""Exact, tick-by-tick neural replay without SM64."""
+"""Exact, tick-by-tick neural replay without SRB2."""
 import argparse
 import json
 from pathlib import Path

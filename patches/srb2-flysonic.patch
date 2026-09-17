@@ -1,0 +1,910 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 2cfb56f..058980e 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -104,6 +104,7 @@ add_executable(SRB2SDL2 MACOSX_BUNDLE WIN32
+ 	lua_hudlib_drawlist.c
+ 	lua_colorlib.c
+ 	lua_inputlib.c
++	fly_bridge.c
+ )
+ 
+ # This updates the modification time for comptime.c at the
+diff --git a/src/Sourcefile b/src/Sourcefile
+index 60ee5db..46dc550 100644
+--- a/src/Sourcefile
++++ b/src/Sourcefile
+@@ -97,4 +97,5 @@ lua_blockmaplib.c
+ lua_hudlib.c
+ lua_hudlib_drawlist.c
+ lua_inputlib.c
++fly_bridge.c
+ lua_colorlib.c
+diff --git a/src/d_main.c b/src/d_main.c
+index d75a4d5..5d48a2e 100644
+--- a/src/d_main.c
++++ b/src/d_main.c
+@@ -57,6 +57,7 @@
+ #include "w_wad.h"
+ #include "z_zone.h"
+ #include "d_main.h"
++#include "fly_bridge.h"
+ #include "netcode/d_netfil.h"
+ #include "m_cheat.h"
+ #include "y_inter.h"
+@@ -1481,6 +1482,7 @@ void D_SRB2Main(void)
+ 
+ 	D_RegisterServerCommands();
+ 	D_RegisterClientCommands(); // be sure that this is called before D_CheckNetGame
++	Fly_RegisterCommands(); // Fly Sonic console variables
+ 	R_RegisterEngineStuff();
+ 	S_RegisterSoundStuff();
+ 
+diff --git a/src/fly_bridge.c b/src/fly_bridge.c
+new file mode 100644
+index 0000000..25a32cf
+--- /dev/null
++++ b/src/fly_bridge.c
+@@ -0,0 +1,637 @@
++// Fly Sonic bridge for Sonic Robo Blast 2
++//-----------------------------------------------------------------------------
++// Shares a small memory-mapped file with the fly brain model process.
++// See fly_bridge.h for the overview and the Fly Sonic technical notes for
++// the byte layout. The game never blocks on the model: every read is a
++// bounded seqlock read and controls are released after 250 ms of silence.
++//
++// This file is part of the Fly Sonic project and is released under the
++// GNU General Public License, version 2, like the rest of SRB2.
++//-----------------------------------------------------------------------------
++/// \file  fly_bridge.c
++/// \brief Shared-memory bridge between SRB2 and the Fly Sonic neural model
++
++#include "fly_bridge.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#ifdef _WIN32
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#else
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#endif
++
++#ifdef HAVE_SDL
++#include "SDL.h"
++#endif
++
++#include "command.h"
++#include "console.h"
++#include "d_player.h"
++#include "doomstat.h"
++#include "g_game.h"
++#include "g_state.h"
++#include "i_joy.h"
++#include "i_system.h"
++#include "i_video.h"
++#include "p_local.h"
++#include "p_tick.h"
++#include "screen.h"
++
++#define FLY_MAGIC "FLYSONIC"
++#define FLY_VERSION 2
++#define FLY_WIDTH 64
++#define FLY_HEIGHT 48
++#define FLY_FRAME_BYTES (FLY_WIDTH * FLY_HEIGHT * 3)
++#define FLY_HEADER_BYTES 128
++#define FLY_FILE_BYTES (FLY_HEADER_BYTES + FLY_FRAME_BYTES)
++#define FLY_STALE_MS 250
++#define FLY_CAPTURE_MS 100
++
++// Model button bits (informational; the events below drive the holds).
++#define FLY_BUTTON_JUMP 0x0001
++#define FLY_BUTTON_SPIN 0x0002
++
++// game_status values reported to the dashboard.
++enum
++{
++	FLY_STATUS_DISABLED = 0,
++	FLY_STATUS_APPLIED = 1,
++	FLY_STATUS_STALE = 2,
++	FLY_STATUS_TORN = 3,
++	// 4 is "game not connected", derived by the model side.
++	FLY_STATUS_PAUSED = 5,
++};
++
++#if defined(__GNUC__) || defined(__clang__)
++#define FLY_LOAD(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)
++#define FLY_STORE(p, v) __atomic_store_n((p), (v), __ATOMIC_RELEASE)
++#define FLY_FENCE() __atomic_thread_fence(__ATOMIC_SEQ_CST)
++#elif defined(_MSC_VER)
++#define FLY_LOAD(p) (MemoryBarrier(), *(p))
++#define FLY_STORE(p, v) do { MemoryBarrier(); *(p) = (v); MemoryBarrier(); } while (0)
++#define FLY_FENCE() MemoryBarrier()
++#else
++#define FLY_LOAD(p) (*(p))
++#define FLY_STORE(p, v) (*(p) = (v))
++#define FLY_FENCE() ((void)0)
++#endif
++
++#if defined(_MSC_VER)
++#pragma pack(push, 1)
++#endif
++struct FlyHeader
++{
++	char magic[8];                       // 0   "FLYSONIC"
++	UINT32 version;                      // 8   2
++	volatile UINT32 frame_seq;           // 12  game: seqlock for the thumbnail
++	volatile UINT32 control_seq;         // 16  model: seqlock for the controls
++	volatile UINT32 enabled;             // 20  game: neural control toggle
++	volatile UINT32 control_count;       // 24  model: incremented per control write
++	volatile SINT8 stick_x;               // 28  model: turn, -70..70
++	volatile SINT8 stick_y;               // 29  model: forward, 0..70
++	volatile UINT16 buttons;             // 30  model: FLY_BUTTON_* mask
++	volatile UINT32 jump_event;          // 32  model: incremented per jump
++	volatile UINT32 spin_event;          // 36  model: incremented per spin
++	volatile UINT32 applied_seq;         // 40  game: control_seq that was applied
++	volatile SINT8 applied_x;             // 44  game: turn axis applied (-70..70)
++	volatile SINT8 applied_y;             // 45  game: forward applied (-70..70)
++	volatile UINT16 applied_buttons;     // 46  game: ticcmd buttons applied (BT_*)
++	volatile UINT32 game_tick;           // 48  game: incremented per local tic
++	volatile UINT32 game_status;         // 52  game: FLY_STATUS_*
++	volatile UINT32 telemetry_seq;       // 56  game: seqlock for the block below
++	volatile INT32 rings;                // 60
++	volatile INT32 lives;                // 64
++	volatile INT32 score;                // 68
++	volatile INT32 map;                  // 72
++	volatile UINT32 leveltime;           // 76
++	volatile INT32 pos_x;                // 80  world units (fixed >> 16)
++	volatile INT32 pos_y;                // 84
++	volatile INT32 pos_z;                // 88
++	volatile INT32 speed;                // 92  world units per tic (fixed >> 16)
++	volatile INT32 gamestate;            // 96
++	volatile INT32 playerstate;          // 100 low byte playerstate_t, bit 8 exiting
++	volatile UINT32 capture_count;       // 104 thumbnails published so far
++	volatile UINT32 render_mode;         // 108 0 software, 1 opengl
++	volatile INT32 applied_angleturn;    // 112 final cmd->angleturn
++	volatile INT32 applied_forwardmove;  // 116 final cmd->forwardmove
++	UINT8 padding[8];                    // 120..127
++} ATTRPACK;
++
++struct FlyShared
++{
++	struct FlyHeader h;
++	UINT8 rgb[FLY_FRAME_BYTES];
++} ATTRPACK;
++#if defined(_MSC_VER)
++#pragma pack(pop)
++#endif
++
++typedef char fly_header_size_check[(sizeof(struct FlyHeader) == FLY_HEADER_BYTES) ? 1 : -1];
++
++static struct FlyShared *shared;
++static boolean open_failed;
++#ifdef _WIN32
++static HANDLE bridge_file = INVALID_HANDLE_VALUE;
++static HANDLE bridge_map;
++#else
++static int bridge_fd = -1;
++#endif
++
++static UINT8 *capture_scratch;
++static size_t capture_scratch_size;
++static precise_t last_capture;
++static boolean capture_ever;
++
++// Last good control packet and its liveness bookkeeping.
++static SINT8 packet_x, packet_y;
++static UINT16 packet_buttons;
++static UINT32 packet_seq, packet_count, packet_jump_event, packet_spin_event;
++static boolean packet_valid;
++static precise_t packet_changed_at;
++static boolean packet_ever;
++
++static UINT32 last_jump_event, last_spin_event;
++static INT32 jump_tics, spin_tics;
++static boolean active_this_tic;
++
++static CV_PossibleValue_t holdtics_cons_t[] = {{1, "MIN"}, {70, "MAX"}, {0, NULL}};
++static consvar_t cv_fly_jumptics = CVAR_INIT ("fly_jumptics", "8", CV_SAVE, holdtics_cons_t, NULL);
++static consvar_t cv_fly_spintics = CVAR_INIT ("fly_spintics", "8", CV_SAVE, holdtics_cons_t, NULL);
++static consvar_t cv_fly_infinitelives = CVAR_INIT ("fly_infinitelives", "On", CV_SAVE, CV_OnOff, NULL);
++
++static UINT64 ms_to_precise(UINT32 ms)
++{
++	return I_GetPrecisePrecision() * ms / 1000;
++}
++
++static void bridge_close(void)
++{
++	if (shared != NULL)
++	{
++#ifdef _WIN32
++		UnmapViewOfFile((void *)shared);
++#else
++		munmap(shared, FLY_FILE_BYTES);
++#endif
++		shared = NULL;
++	}
++#ifdef _WIN32
++	if (bridge_map != NULL)
++	{
++		CloseHandle(bridge_map);
++		bridge_map = NULL;
++	}
++	if (bridge_file != INVALID_HANDLE_VALUE)
++	{
++		CloseHandle(bridge_file);
++		bridge_file = INVALID_HANDLE_VALUE;
++	}
++#else
++	if (bridge_fd >= 0)
++	{
++		close(bridge_fd);
++		bridge_fd = -1;
++	}
++#endif
++}
++
++static boolean bridge_open(void)
++{
++	const char *path;
++	if (shared != NULL)
++		return true;
++	if (open_failed)
++		return false;
++	path = getenv("FLY_BRIDGE");
++	if (path == NULL || path[0] == '\0')
++	{
++		open_failed = true; // no bridge requested for this run
++		return false;
++	}
++#ifdef _WIN32
++	{
++		LARGE_INTEGER size;
++		bridge_file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
++			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
++			OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
++		if (bridge_file == INVALID_HANDLE_VALUE)
++		{
++			open_failed = true;
++			CONS_Alert(CONS_WARNING, "Fly Sonic: cannot open bridge %s\n", path);
++			return false;
++		}
++		if (!GetFileSizeEx(bridge_file, &size) || size.QuadPart != FLY_FILE_BYTES)
++		{
++			CONS_Alert(CONS_WARNING, "Fly Sonic: bridge %s has the wrong size\n", path);
++			open_failed = true;
++			bridge_close();
++			return false;
++		}
++		bridge_map = CreateFileMappingA(bridge_file, NULL, PAGE_READWRITE, 0, FLY_FILE_BYTES, NULL);
++		if (bridge_map != NULL)
++			shared = (struct FlyShared *)MapViewOfFile(bridge_map, FILE_MAP_ALL_ACCESS, 0, 0, FLY_FILE_BYTES);
++	}
++#else
++	{
++		struct stat st;
++		bridge_fd = open(path, O_RDWR);
++		if (bridge_fd < 0)
++		{
++			open_failed = true;
++			CONS_Alert(CONS_WARNING, "Fly Sonic: cannot open bridge %s\n", path);
++			return false;
++		}
++		if (fstat(bridge_fd, &st) != 0 || st.st_size != FLY_FILE_BYTES)
++		{
++			CONS_Alert(CONS_WARNING, "Fly Sonic: bridge %s has the wrong size\n", path);
++			open_failed = true;
++			bridge_close();
++			return false;
++		}
++		shared = mmap(NULL, FLY_FILE_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, bridge_fd, 0);
++		if (shared == MAP_FAILED)
++			shared = NULL;
++	}
++#endif
++	if (shared == NULL)
++	{
++		CONS_Alert(CONS_WARNING, "Fly Sonic: cannot map bridge %s\n", path);
++		open_failed = true;
++		bridge_close();
++		return false;
++	}
++	if (memcmp(shared->h.magic, FLY_MAGIC, 8) != 0 || shared->h.version != FLY_VERSION)
++	{
++		CONS_Alert(CONS_WARNING, "Fly Sonic: incompatible bridge %s (expected %s v%d)\n", path, FLY_MAGIC, FLY_VERSION);
++		open_failed = true;
++		bridge_close();
++		return false;
++	}
++	CONS_Printf("Fly Sonic: bridge connected at %s (neural control %s)\n", path, shared->h.enabled ? "enabled" : "disabled");
++	return true;
++}
++
++static void Command_FlyNeural_f(void)
++{
++	if (!bridge_open())
++	{
++		CONS_Printf("Fly Sonic: no bridge is connected (set FLY_BRIDGE before launching)\n");
++		return;
++	}
++	if (COM_Argc() < 2)
++	{
++		CONS_Printf("fly_neural <on|off|toggle>: neural control is currently %s\n", shared->h.enabled ? "on" : "off");
++		return;
++	}
++	if (!stricmp(COM_Argv(1), "toggle"))
++		Fly_Toggle();
++	else
++	{
++		FLY_STORE(&shared->h.enabled, (UINT32)(!stricmp(COM_Argv(1), "on") || !stricmp(COM_Argv(1), "1")));
++		CONS_Printf("Fly Sonic: neural control %s\n", shared->h.enabled ? "enabled" : "disabled");
++	}
++}
++
++void Fly_RegisterCommands(void)
++{
++	CV_RegisterVar(&cv_fly_jumptics);
++	CV_RegisterVar(&cv_fly_spintics);
++	CV_RegisterVar(&cv_fly_infinitelives);
++	COM_AddCommand("fly_neural", Command_FlyNeural_f, 0);
++}
++
++void Fly_Toggle(void)
++{
++	if (!bridge_open())
++		return;
++	FLY_STORE(&shared->h.enabled, (UINT32)!shared->h.enabled);
++	CONS_Printf("Fly Sonic: neural control %s\n", shared->h.enabled ? "enabled" : "disabled");
++}
++
++// Bounded seqlock read of the model's control packet. Returns true when a
++// consistent packet was read (fresh or not); false when every attempt tore.
++static boolean read_packet(void)
++{
++	int attempt;
++	for (attempt = 0; attempt < 3; attempt++)
++	{
++		UINT32 before, after, count, jump, spin;
++		SINT8 x, y;
++		UINT16 buttons;
++		before = FLY_LOAD(&shared->h.control_seq);
++		if (before & 1U)
++			continue;
++		count = shared->h.control_count;
++		x = shared->h.stick_x;
++		y = shared->h.stick_y;
++		buttons = shared->h.buttons;
++		jump = shared->h.jump_event;
++		spin = shared->h.spin_event;
++		FLY_FENCE();
++		after = FLY_LOAD(&shared->h.control_seq);
++		if (before != after)
++			continue;
++		if (!packet_valid || count != packet_count)
++		{
++			packet_count = count;
++			packet_changed_at = I_GetPreciseTime();
++		}
++		packet_valid = true;
++		packet_seq = after;
++		packet_x = x;
++		packet_y = y;
++		packet_buttons = buttons;
++		packet_jump_event = jump;
++		packet_spin_event = spin;
++		return true;
++	}
++	return false;
++}
++
++static boolean packet_fresh(void)
++{
++	if (!packet_valid)
++		return false;
++	return (I_GetPreciseTime() - packet_changed_at) <= ms_to_precise(FLY_STALE_MS);
++}
++
++static void write_telemetry(void)
++{
++	player_t *player = NULL;
++	UINT32 seq = shared->h.telemetry_seq;
++	if (gamestate == GS_LEVEL && consoleplayer >= 0 && consoleplayer < MAXPLAYERS && playeringame[consoleplayer])
++		player = &players[consoleplayer];
++	FLY_STORE(&shared->h.telemetry_seq, seq | 1U);
++	shared->h.gamestate = (INT32)gamestate;
++	shared->h.map = (INT32)gamemap;
++	shared->h.leveltime = (UINT32)leveltime;
++	if (player != NULL)
++	{
++		shared->h.rings = player->rings;
++		shared->h.lives = player->lives;
++		shared->h.score = (INT32)player->score;
++		shared->h.playerstate = (INT32)player->playerstate | (player->exiting ? 0x100 : 0);
++		shared->h.speed = player->speed >> FRACBITS;
++		if (player->mo != NULL)
++		{
++			shared->h.pos_x = player->mo->x >> FRACBITS;
++			shared->h.pos_y = player->mo->y >> FRACBITS;
++			shared->h.pos_z = player->mo->z >> FRACBITS;
++		}
++	}
++	else
++	{
++		shared->h.rings = shared->h.lives = shared->h.score = 0;
++		shared->h.playerstate = -1;
++		shared->h.speed = shared->h.pos_x = shared->h.pos_y = shared->h.pos_z = 0;
++	}
++	shared->h.render_mode = (rendermode == render_opengl) ? 1 : 0;
++	FLY_STORE(&shared->h.telemetry_seq, (seq | 1U) + 1U);
++}
++
++void Fly_TicBegin(void)
++{
++	boolean in_level;
++	active_this_tic = false;
++	if (!bridge_open())
++		return;
++
++	FLY_STORE(&shared->h.game_tick, shared->h.game_tick + 1U);
++
++	if (cv_fly_infinitelives.value && !netgame && gamestate == GS_LEVEL
++		&& consoleplayer >= 0 && consoleplayer < MAXPLAYERS && playeringame[consoleplayer]
++		&& players[consoleplayer].lives != INFLIVES)
++		players[consoleplayer].lives = INFLIVES;
++
++	write_telemetry();
++
++	shared->h.applied_x = 0;
++	shared->h.applied_y = 0;
++	shared->h.applied_buttons = 0;
++	shared->h.applied_angleturn = 0;
++	shared->h.applied_forwardmove = 0;
++
++	if (!shared->h.enabled)
++	{
++		jump_tics = spin_tics = 0;
++		FLY_STORE(&shared->h.game_status, (UINT32)FLY_STATUS_DISABLED);
++		return;
++	}
++	if (!read_packet() && !packet_fresh())
++	{
++		jump_tics = spin_tics = 0;
++		FLY_STORE(&shared->h.game_status, (UINT32)FLY_STATUS_TORN);
++		return;
++	}
++	if (!packet_fresh())
++	{
++		jump_tics = spin_tics = 0;
++		FLY_STORE(&shared->h.game_status, (UINT32)FLY_STATUS_STALE);
++		return;
++	}
++	in_level = (gamestate == GS_LEVEL && !paused && !P_AutoPause()
++		&& consoleplayer >= 0 && consoleplayer < MAXPLAYERS && playeringame[consoleplayer]);
++	if (!in_level)
++	{
++		jump_tics = spin_tics = 0;
++		last_jump_event = packet_jump_event; // do not replay events that happened while paused
++		last_spin_event = packet_spin_event;
++		FLY_STORE(&shared->h.game_status, (UINT32)FLY_STATUS_PAUSED);
++		return;
++	}
++	if (!packet_ever)
++	{
++		packet_ever = true; // ignore events from before the game was ready
++		last_jump_event = packet_jump_event;
++		last_spin_event = packet_spin_event;
++	}
++	if (packet_jump_event != last_jump_event)
++	{
++		jump_tics = cv_fly_jumptics.value;
++		last_jump_event = packet_jump_event;
++	}
++	if (packet_spin_event != last_spin_event)
++	{
++		spin_tics = cv_fly_spintics.value;
++		last_spin_event = packet_spin_event;
++	}
++	active_this_tic = true;
++	FLY_STORE(&shared->h.game_status, (UINT32)FLY_STATUS_APPLIED);
++}
++
++boolean Fly_Active(void)
++{
++	return active_this_tic;
++}
++
++void Fly_OverrideAxes(INT32 *turnaxis, INT32 *moveaxis)
++{
++	if (!active_this_tic)
++		return;
++	// Positive x turns right; SRB2 turns right for a positive turn axis.
++	// Forward is a negative move axis in SRB2, like pushing a stick up.
++	if (turnaxis != NULL)
++		*turnaxis = (INT32)packet_x * JOYAXISRANGE / 70;
++	if (moveaxis != NULL)
++		*moveaxis = -(INT32)packet_y * JOYAXISRANGE / 70;
++}
++
++boolean Fly_JumpHeld(void)
++{
++	if (!active_this_tic || jump_tics <= 0)
++		return false;
++	jump_tics--;
++	return true;
++}
++
++boolean Fly_SpinHeld(void)
++{
++	if (!active_this_tic || spin_tics <= 0)
++		return false;
++	spin_tics--;
++	return true;
++}
++
++void Fly_TicEnd(const ticcmd_t *cmd)
++{
++	if (shared == NULL || !active_this_tic || cmd == NULL)
++		return;
++	shared->h.applied_x = packet_x;
++	shared->h.applied_y = packet_y;
++	shared->h.applied_buttons = cmd->buttons;
++	shared->h.applied_angleturn = cmd->angleturn;
++	shared->h.applied_forwardmove = cmd->forwardmove;
++	FLY_STORE(&shared->h.applied_seq, packet_seq);
++}
++
++boolean Fly_WantsCapture(void)
++{
++	precise_t now;
++	if (!bridge_open())
++		return false;
++	now = I_GetPreciseTime();
++	if (capture_ever && (now - last_capture) < ms_to_precise(FLY_CAPTURE_MS))
++		return false;
++	return true;
++}
++
++UINT8 *Fly_CaptureBuffer(size_t bytes)
++{
++	if (bytes == 0)
++		return NULL;
++	if (bytes > capture_scratch_size)
++	{
++		UINT8 *next = realloc(capture_scratch, bytes);
++		if (next == NULL)
++			return NULL;
++		capture_scratch = next;
++		capture_scratch_size = bytes;
++	}
++	return capture_scratch;
++}
++
++static void publish_begin(UINT32 *seq)
++{
++	*seq = shared->h.frame_seq;
++	FLY_STORE(&shared->h.frame_seq, *seq | 1U);
++}
++
++static void publish_end(UINT32 seq)
++{
++	FLY_STORE(&shared->h.frame_seq, (seq | 1U) + 1U);
++	shared->h.capture_count++;
++	last_capture = I_GetPreciseTime();
++	capture_ever = true;
++}
++
++void Fly_CaptureRGB(const UINT8 *rgb, INT32 width, INT32 height, INT32 stride)
++{
++	UINT32 seq;
++	INT32 x, y;
++	if (shared == NULL || rgb == NULL || width <= 0 || height <= 0)
++		return;
++	publish_begin(&seq);
++	for (y = 0; y < FLY_HEIGHT; y++)
++	{
++		const UINT8 *row = rgb + (size_t)(y * height / FLY_HEIGHT) * stride;
++		UINT8 *out = &shared->rgb[y * FLY_WIDTH * 3];
++		for (x = 0; x < FLY_WIDTH; x++)
++		{
++			const UINT8 *px = row + (size_t)(x * width / FLY_WIDTH) * 3;
++			out[x * 3] = px[0];
++			out[x * 3 + 1] = px[1];
++			out[x * 3 + 2] = px[2];
++		}
++	}
++	publish_end(seq);
++}
++
++void Fly_CaptureSDLSurface(void *sdl_surface)
++{
++#ifdef HAVE_SDL
++	SDL_Surface *surface = (SDL_Surface *)sdl_surface;
++	UINT32 seq;
++	INT32 x, y;
++	int bpp;
++	if (shared == NULL || surface == NULL || surface->w <= 0 || surface->h <= 0)
++		return;
++	bpp = surface->format->BytesPerPixel;
++	if (bpp < 1 || bpp > 4)
++		return;
++	if (SDL_MUSTLOCK(surface) && SDL_LockSurface(surface) != 0)
++		return;
++	publish_begin(&seq);
++	for (y = 0; y < FLY_HEIGHT; y++)
++	{
++		const UINT8 *row = (const UINT8 *)surface->pixels + (size_t)(y * surface->h / FLY_HEIGHT) * surface->pitch;
++		UINT8 *out = &shared->rgb[y * FLY_WIDTH * 3];
++		for (x = 0; x < FLY_WIDTH; x++)
++		{
++			const UINT8 *px = row + (size_t)(x * surface->w / FLY_WIDTH) * bpp;
++			Uint32 pixel = 0;
++			Uint8 r, g, b;
++			switch (bpp)
++			{
++				case 1: pixel = *px; break;
++				case 2: pixel = *(const Uint16 *)px; break;
++				case 3: pixel = (Uint32)px[0] | ((Uint32)px[1] << 8) | ((Uint32)px[2] << 16); break;
++				default: pixel = *(const Uint32 *)px; break;
++			}
++			SDL_GetRGB(pixel, surface->format, &r, &g, &b);
++			out[x * 3] = r;
++			out[x * 3 + 1] = g;
++			out[x * 3 + 2] = b;
++		}
++	}
++	publish_end(seq);
++	if (SDL_MUSTLOCK(surface))
++		SDL_UnlockSurface(surface);
++#else
++	(void)sdl_surface;
++#endif
++}
++
++void Fly_Shutdown(void)
++{
++	if (shared != NULL)
++	{
++		shared->h.applied_x = 0;
++		shared->h.applied_y = 0;
++		shared->h.applied_buttons = 0;
++		FLY_STORE(&shared->h.game_status, (UINT32)FLY_STATUS_DISABLED);
++		// A zero tick counter tells the model side immediately that no game is
++		// attached, instead of waiting for the 250 ms liveness timeout.
++		FLY_STORE(&shared->h.game_tick, 0U);
++	}
++	bridge_close();
++	free(capture_scratch);
++	capture_scratch = NULL;
++	capture_scratch_size = 0;
++}
+diff --git a/src/fly_bridge.h b/src/fly_bridge.h
+new file mode 100644
+index 0000000..7551b43
+--- /dev/null
++++ b/src/fly_bridge.h
+@@ -0,0 +1,64 @@
++// Fly Sonic bridge for Sonic Robo Blast 2
++//-----------------------------------------------------------------------------
++// Shares a small memory-mapped file with the fly brain model process:
++// the game writes a 64x48 RGB thumbnail of its framebuffer ten times a
++// second, the model writes stick/jump controls fifty times a second, and
++// the game reports what it actually applied plus a little level telemetry.
++//
++// This file is part of the Fly Sonic project and is released under the
++// GNU General Public License, version 2, like the rest of SRB2.
++//-----------------------------------------------------------------------------
++/// \file  fly_bridge.h
++/// \brief Shared-memory bridge between SRB2 and the Fly Sonic neural model
++
++#ifndef __FLY_BRIDGE__
++#define __FLY_BRIDGE__
++
++#include "doomtype.h"
++#include "d_ticcmd.h"
++
++/// Registers the fly_* console variables. Call once during startup.
++void Fly_RegisterCommands(void);
++
++/// True when the bridge file is mapped, neural control is enabled and the
++/// last control packet from the model is fresh.
++boolean Fly_Active(void);
++
++/// Called once per local tic before SRB2 mixes its own inputs.
++/// Reads the latest control packet and publishes game telemetry.
++void Fly_TicBegin(void);
++
++/// Replaces the joystick turn (x) and move (y) axes with the fly's decoded
++/// motor state when active. Axes use SRB2's JOYAXISRANGE (+-1023).
++void Fly_OverrideAxes(INT32 *turnaxis, INT32 *moveaxis);
++
++/// True while a fly jump event should hold BT_JUMP.
++boolean Fly_JumpHeld(void);
++
++/// True while a fly spin event should hold BT_SPIN.
++boolean Fly_SpinHeld(void);
++
++/// Called once per local tic with the final ticcmd so the model and the
++/// dashboard can see what the game really received.
++void Fly_TicEnd(const ticcmd_t *cmd);
++
++/// Toggles neural control (bound to F6 in the SDL layer).
++void Fly_Toggle(void);
++
++/// True when a framebuffer thumbnail is due (bridge mapped, >= 100 ms since
++/// the previous capture). Cheap; call every rendered frame.
++boolean Fly_WantsCapture(void);
++
++/// Scratch buffer for hardware-rendered readback. Owned by the bridge.
++UINT8 *Fly_CaptureBuffer(size_t bytes);
++
++/// Publishes a top-to-bottom 24-bit RGB image (any size) as the thumbnail.
++void Fly_CaptureRGB(const UINT8 *rgb, INT32 width, INT32 height, INT32 stride);
++
++/// Publishes an SDL_Surface (software renderer) as the thumbnail.
++void Fly_CaptureSDLSurface(void *sdl_surface);
++
++/// Unmaps the bridge. Safe to call more than once.
++void Fly_Shutdown(void);
++
++#endif
+diff --git a/src/g_game.c b/src/g_game.c
+index 1c186ae..82a67d6 100644
+--- a/src/g_game.c
++++ b/src/g_game.c
+@@ -29,6 +29,7 @@
+ #include "r_main.h"
+ #include "s_sound.h"
+ #include "g_game.h"
++#include "fly_bridge.h"
+ #include "g_demo.h"
+ #include "m_cheat.h"
+ #include "m_misc.h"
+@@ -1145,6 +1146,7 @@ void G_BuildTiccmd(ticcmd_t *cmd, INT32 realtics, UINT8 ssplayer)
+ 		mdy = -mouse.dy;
+ 		mldy = -mouse.mlookdy;
+ 		G_CopyTiccmd(cmd, I_BaseTiccmd(), 1); // empty, or external driver
++		Fly_TicBegin(); // Fly Sonic: read the neural control packet, publish telemetry
+ 	}
+ 	else
+ 	{
+@@ -1198,6 +1200,12 @@ void G_BuildTiccmd(ticcmd_t *cmd, INT32 realtics, UINT8 ssplayer)
+ 		((chasecam && !player->spectator) ? chasefreelook : alwaysfreelook);
+ 	analogjoystickmove = usejoystick && !Joystick.bGamepadStyle;
+ 	gamepadjoystickmove = usejoystick && Joystick.bGamepadStyle;
++	if (ssplayer == 1 && Fly_Active())
++	{
++		// Fly Sonic: the decoded motor state is treated as an analog joystick.
++		analogjoystickmove = true;
++		gamepadjoystickmove = false;
++	}
+ 
+ 	thisjoyaiming = (chasecam && !player->spectator) ? chasefreelook : alwaysfreelook;
+ 
+@@ -1213,6 +1221,8 @@ void G_BuildTiccmd(ticcmd_t *cmd, INT32 realtics, UINT8 ssplayer)
+ 	lookjoystickvector.xaxis = turnaxis;
+ 	lookjoystickvector.yaxis = lookaxis;
+ 	G_HandleAxisDeadZone(forplayer, &lookjoystickvector);
++	if (ssplayer == 1)
++		Fly_OverrideAxes(&lookjoystickvector.xaxis, NULL); // Fly Sonic: steering
+ 
+ 	if (gamepadjoystickmove && lookjoystickvector.xaxis != 0)
+ 	{
+@@ -1293,6 +1303,8 @@ void G_BuildTiccmd(ticcmd_t *cmd, INT32 realtics, UINT8 ssplayer)
+ 	movejoystickvector.xaxis = strafeaxis;
+ 	movejoystickvector.yaxis = moveaxis;
+ 	G_HandleAxisDeadZone(forplayer, &movejoystickvector);
++	if (ssplayer == 1)
++		Fly_OverrideAxes(NULL, &movejoystickvector.yaxis); // Fly Sonic: forward drive
+ 
+ 	if (gamepadjoystickmove && movejoystickvector.xaxis != 0)
+ 	{
+@@ -1367,7 +1379,7 @@ void G_BuildTiccmd(ticcmd_t *cmd, INT32 realtics, UINT8 ssplayer)
+ 
+ 	// use with any button/key
+ 	axis = PlayerJoyAxis(ssplayer, JA_SPIN);
+-	if (PLAYERINPUTDOWN(ssplayer, GC_SPIN) || (usejoystick && axis > 0))
++	if (PLAYERINPUTDOWN(ssplayer, GC_SPIN) || (usejoystick && axis > 0) || (ssplayer == 1 && Fly_SpinHeld()))
+ 		cmd->buttons |= BT_SPIN;
+ 
+ 	if (gamestate == GS_INTRO) // prevent crash in intro
+@@ -1495,7 +1507,7 @@ void G_BuildTiccmd(ticcmd_t *cmd, INT32 realtics, UINT8 ssplayer)
+ 
+ 	// jump button
+ 	axis = PlayerJoyAxis(ssplayer, JA_JUMP);
+-	if (PLAYERINPUTDOWN(ssplayer, GC_JUMP) || (usejoystick && axis > 0))
++	if (PLAYERINPUTDOWN(ssplayer, GC_JUMP) || (usejoystick && axis > 0) || (ssplayer == 1 && Fly_JumpHeld()))
+ 		cmd->buttons |= BT_JUMP;
+ 
+ 	// player aiming shit, ahhhh...
+@@ -1741,6 +1753,9 @@ void G_BuildTiccmd(ticcmd_t *cmd, INT32 realtics, UINT8 ssplayer)
+ 
+ 	cmd->angleturn = (INT16)(cmd->angleturn + ticcmd_oldangleturn[forplayer]);
+ 	ticcmd_oldangleturn[forplayer] = cmd->angleturn;
++
++	if (ssplayer == 1)
++		Fly_TicEnd(cmd); // Fly Sonic: report what the game really received
+ }
+ 
+ ticcmd_t *G_CopyTiccmd(ticcmd_t* dest, const ticcmd_t* src, const size_t n)
+diff --git a/src/sdl/i_video.c b/src/sdl/i_video.c
+index 82583cc..11d58b1 100644
+--- a/src/sdl/i_video.c
++++ b/src/sdl/i_video.c
+@@ -61,6 +61,7 @@
+ 
+ #include "../doomstat.h"
+ #include "../i_system.h"
++#include "../fly_bridge.h"
+ #include "../v_video.h"
+ #include "../m_argv.h"
+ #include "../m_menu.h"
+@@ -679,6 +680,11 @@ static void Impl_HandleWindowEvent(SDL_WindowEvent evt)
+ static void Impl_HandleKeyboardEvent(SDL_KeyboardEvent evt, Uint32 type)
+ {
+ 	event_t event;
++	if (type == SDL_KEYDOWN && evt.keysym.scancode == SDL_SCANCODE_F6 && !evt.repeat)
++	{
++		Fly_Toggle(); // Fly Sonic: F6 toggles neural control
++		return;
++	}
+ 	if (type == SDL_KEYUP)
+ 	{
+ 		event.type = ev_keyup;
+@@ -1287,6 +1293,8 @@ void I_FinishUpdate(void)
+ 		if (bufSurface)
+ 		{
+ 			SDL_BlitSurface(bufSurface, &src_rect, vidSurface, &src_rect);
++			if (Fly_WantsCapture())
++				Fly_CaptureSDLSurface(vidSurface); // Fly Sonic: 64x48 retinal thumbnail
+ 			// Fury -- there's no way around UpdateTexture, the GL backend uses it anyway
+ 			SDL_LockSurface(vidSurface);
+ 			SDL_UpdateTexture(texture, &src_rect, vidSurface->pixels, vidSurface->pitch);
+@@ -1308,6 +1316,16 @@ void I_FinishUpdate(void)
+ 			HWD.pfnDrawScreenTexture(HWD_SCREENTEXTURE_GENERIC2, NULL, 0);
+ 			HWD.pfnUnSetShader();
+ 		}
++		if (Fly_WantsCapture())
++		{
++			// Fly Sonic: read the finished frame back before it is presented
++			UINT8 *flyrgb = Fly_CaptureBuffer((size_t)vid.width * (size_t)vid.height * 3);
++			if (flyrgb)
++			{
++				HWD.pfnReadScreenTexture(HWD_SCREENTEXTURE_GENERIC2, flyrgb);
++				Fly_CaptureRGB(flyrgb, vid.width, vid.height, vid.width * 3);
++			}
++		}
+ 		OglSdlFinishUpdate(cv_vidwait.value);
+ 	}
+ #endif
+@@ -1924,6 +1942,8 @@ void I_ShutdownGraphics(void)
+ {
+ 	const rendermode_t oldrendermode = rendermode;
+ 
++	Fly_Shutdown(); // Fly Sonic: release the bridge before the surfaces go away
++
+ 	rendermode = render_none;
+ 	if (icoSurface) SDL_FreeSurface(icoSurface);
+ 	icoSurface = NULL;
+diff --git a/src/m_misc.c b/src/m_misc.c
+index 24616e9..bcf58c5 100644
+--- a/src/m_misc.c
++++ b/src/m_misc.c
+@@ -980,9 +980,9 @@ static inline boolean M_PNGLib(void)
+ 	aPNG_write_frame_tail = hwSym("png_write_frame_tail", pnglib);
+ #endif
+ #ifdef _WIN32
+-	aPNG_set_acTL = GetProcAddress("png_set_acTL", pnglib);
+-	aPNG_write_frame_head = GetProcAddress("png_write_frame_head", pnglib);
+-	aPNG_write_frame_tail = GetProcAddress("png_write_frame_tail", pnglib);
++	aPNG_set_acTL = (P_png_set_acTL)GetProcAddress((HMODULE)pnglib, "png_set_acTL");
++	aPNG_write_frame_head = (P_png_write_frame_head)GetProcAddress((HMODULE)pnglib, "png_write_frame_head");
++	aPNG_write_frame_tail = (P_png_write_frame_tail)GetProcAddress((HMODULE)pnglib, "png_write_frame_tail");
+ #endif
+ 	return (aPNG_set_acTL && aPNG_write_frame_head && aPNG_write_frame_tail);
+ #endif

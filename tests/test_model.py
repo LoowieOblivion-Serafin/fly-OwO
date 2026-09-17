@@ -1,6 +1,6 @@
 import numpy as np
 
-from fly64.model import FlyModel
+from flysonic.model import FlyModel
 
 
 def frame(left=0, right=0):

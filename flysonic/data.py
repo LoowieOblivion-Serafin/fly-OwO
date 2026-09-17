@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import json
 import hashlib
@@ -55,12 +56,17 @@ def download(url: str, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_suffix(destination.suffix + ".part")
     print(f"Downloading {url} -> {destination}")
-    # curl uses the macOS/Homebrew trust store reliably and resumes the 1 GB
-    # edge table after an interrupted setup.
-    subprocess.run(
-        ["curl", "--fail", "--location", "--continue-at", "-", "--output", str(partial), url],
-        check=True,
-    )
+    # curl (bundled with Windows 10+, macOS and most Linux installs) resumes the
+    # 1 GB edge table after an interrupted setup; urllib is the fallback.
+    if shutil.which("curl"):
+        subprocess.run(
+            ["curl", "--fail", "--location", "--continue-at", "-", "--output", str(partial), url],
+            check=True,
+        )
+    else:
+        from urllib.request import urlopen
+        with urlopen(url) as response, open(partial, "wb") as out:
+            shutil.copyfileobj(response, out, length=1 << 20)
     partial.replace(destination)
 
 

@@ -20,7 +20,13 @@ class Control:
 
 
 class FlyModel:
-    """Connectome-derived LIF approximation with explicit engineered I/O maps."""
+    """Connectome-derived LIF approximation with explicit engineered I/O maps.
+
+    The decoded motor state (``Control``) is game-agnostic: ``x`` is a steering
+    command (-70..70, positive = right), ``y`` a forward drive (0..70) and
+    ``jump`` a debounced burst event. The SRB2 side maps them onto its analog
+    joystick axes and the jump button (see ``patches/srb2-flysonic.patch``).
+    """
 
     dt = 0.020
     tau_m = 0.100
@@ -35,7 +41,7 @@ class FlyModel:
             self.label = "DEMO FIXTURE — modeled graph"
         else:
             if cache is None or not (cache / "manifest.json").exists():
-                raise FileNotFoundError("Prepared MaleCNS model missing; run ./run-fly64 --prepare-data")
+                raise FileNotFoundError("Prepared MaleCNS model missing; run: python run_flysonic.py --prepare-data")
             self._load_cache(cache)
             self.label = "MaleCNS v1.0 — measured wiring, modeled dynamics"
         self.v = np.zeros(self.n, dtype=np.float32)

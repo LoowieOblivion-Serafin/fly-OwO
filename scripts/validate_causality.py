@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Run the three documented full-model visual-causality checks."""
+"""Run the three documented full-model visual-causality checks on a recorded replay."""
 
 from pathlib import Path
 import numpy as np
 import json
 
-from fly64.model import FlyModel
+from flysonic.model import FlyModel
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,7 +26,7 @@ def run(frames: np.ndarray, connected: bool):
 def main():
     index = json.loads((ROOT / "artifacts/latest-replay.index.json").read_text())
     source = np.concatenate([np.load(ROOT / "artifacts" / p)["frames"] for p in index["chunks"][:3]])
-    source = source[np.flatnonzero(source.mean(axis=(1,2,3)) > 20)[0]:]
+    source = source[np.flatnonzero(source.mean(axis=(1, 2, 3)) > 20)[0]:]
     sample = source[:1000]
     frozen = np.repeat(sample[:1], len(sample), axis=0)
 
@@ -46,8 +46,8 @@ def main():
     report = dict(neurons=166700, ticks=len(sample),
         mean_contrast_live=float(live_temporal[1:].mean()),
         mean_contrast_frozen=float(frozen_temporal[1:].mean()),
-        motor_ticks_different=int(np.any(live_control!=frozen_control,axis=1).sum()),
-        disconnected_motor_ticks_different=int(np.any(disconnected_live!=disconnected_frozen,axis=1).sum()))
+        motor_ticks_different=int(np.any(live_control != frozen_control, axis=1).sum()),
+        disconnected_motor_ticks_different=int(np.any(disconnected_live != disconnected_frozen, axis=1).sum()))
     (ROOT / "artifacts/causality.json").write_text(json.dumps(report, indent=2))
 
 

@@ -1,17 +1,19 @@
+"""Fly Sonic neural closed loop: retina <- SRB2 thumbnail, motor -> SRB2 controls, dashboard."""
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
+import shutil
+import signal
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import webbrowser
-import json
-import signal
-import resource
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,7 +25,24 @@ from websockets.asyncio.server import serve
 from .bridge import CHANNELS, HEIGHT, WIDTH, SharedBridge
 from .model import FlyModel
 
+try:  # POSIX only; Windows reports 0 MB unless psutil is installed.
+    import resource
+except ImportError:  # pragma: no cover - Windows
+    resource = None
+
+DASH_MAGIC = b"FLYS"
 DASH_HEADER = struct.Struct("<4sIdbbBffIIIHH")
+
+
+def rss_mb() -> float:
+    if resource is not None:
+        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # bytes on macOS, KiB elsewhere
+        return usage / 1e6 if sys.platform == "darwin" else usage / 1e3
+    try:
+        import psutil  # type: ignore
+        return psutil.Process().memory_info().rss / 1e6
+    except Exception:
+        return 0.0
 
 
 class DashboardHTTP(BaseHTTPRequestHandler):
@@ -41,7 +60,9 @@ class DashboardHTTP(BaseHTTPRequestHandler):
         elif path == "/metadata.json":
             body, mime = self.metadata, "application/json"
         elif path == "/bridge-status.json" and self.bridge is not None:
-            body, mime = json.dumps(self.bridge.game_status()).encode(), "application/json"
+            status = self.bridge.game_status()
+            status["game"] = self.bridge.telemetry()
+            body, mime = json.dumps(status).encode(), "application/json"
         else:
             self.send_error(404)
             return
@@ -57,10 +78,11 @@ class DashboardHTTP(BaseHTTPRequestHandler):
 
 
 class LocalHTTPServer(ThreadingHTTPServer):
-    """HTTP server that avoids macOS's blocking reverse-DNS lookup at bind time."""
+    """HTTP server that avoids a blocking reverse-DNS lookup at bind time."""
 
     def server_bind(self):
-        self.socket.setsockopt(__import__("socket").SOL_SOCKET, __import__("socket").SO_REUSEADDR, 1)
+        import socket
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.socket.bind(self.server_address)
         self.server_address = self.socket.getsockname()
         self.server_name = "127.0.0.1"
@@ -68,7 +90,7 @@ class LocalHTTPServer(ThreadingHTTPServer):
 
 
 class SyntheticWorld:
-    """ROM-free closed-loop visual source used for integration tests."""
+    """Game-free closed-loop visual source used for integration tests."""
 
     def __init__(self):
         self.heading = 0.0
@@ -98,8 +120,8 @@ class SyntheticWorld:
         stripe = ((xx + int(self.distance * 7)) % 22 < 3) & (yy > horizon)
         sky[stripe] = (205, 190, 95)
         lift = int(5 * np.sin(self.jump_phase)) if self.jump_phase else 0
-        mario = (np.abs(xx - WIDTH // 2) < 3) & (yy > 31 - lift) & (yy < 42 - lift)
-        sky[mario] = (225, 35, 35)
+        hedgehog = (np.abs(xx - WIDTH // 2) < 3) & (yy > 31 - lift) & (yy < 42 - lift)
+        sky[hedgehog] = (35, 60, 225)
         return sky.astype(np.uint8)
 
 
@@ -162,27 +184,53 @@ def start_http(project: Path, model, port: int, ws_port: int) -> ThreadingHTTPSe
     return server
 
 
+def find_app_browser() -> str | None:
+    """A Chromium-family browser that supports --app windows, if any."""
+    candidates: list[str] = []
+    if sys.platform == "win32":
+        roots = [os.environ.get(k, "") for k in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")]
+        for root in filter(None, roots):
+            candidates += [
+                os.path.join(root, "Google", "Chrome", "Application", "chrome.exe"),
+                os.path.join(root, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+                os.path.join(root, "Microsoft", "Edge", "Application", "msedge.exe"),
+                os.path.join(root, "Chromium", "Application", "chrome.exe"),
+            ]
+    elif sys.platform == "darwin":
+        candidates += [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ]
+    else:
+        for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
+                     "brave", "brave-browser", "microsoft-edge"):
+            found = shutil.which(name)
+            if found:
+                candidates.append(found)
+    return next((c for c in candidates if os.path.exists(c)), None)
+
+
 def open_dashboard(url: str, project: Path):
-    chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    if os.path.exists(chrome):
-        profile = Path(tempfile.mkdtemp(prefix="chrome-dashboard-", dir=project / "runtime"))
+    browser = find_app_browser()
+    if browser:
+        profile = Path(tempfile.mkdtemp(prefix="dashboard-", dir=project / "runtime"))
         process = subprocess.Popen([
-            chrome, f"--app={url}", f"--user-data-dir={profile}",
+            browser, f"--app={url}", f"--user-data-dir={profile}",
             "--no-first-run", "--no-default-browser-check",
-            "--window-size=840,900", "--window-position=620,38",
+            "--window-size=840,900", "--window-position=700,40",
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         (project / "runtime/dashboard.pid").write_text(str(process.pid))
         return process
-    else:
-        webbrowser.open(url)
-        return None
+    webbrowser.open(url)
+    return None
 
 
 async def run(args) -> None:
     project = Path(__file__).resolve().parent.parent
     cache = project / ".cache" / "malecns"
     model = FlyModel(cache, demo=args.demo_model)
-    bridge = SharedBridge(args.bridge, create=True)
+    bridge = SharedBridge(args.bridge, create=True, enabled=not args.start_disabled)
     DashboardHTTP.bridge = bridge
     replay = Replay(args.record, model.seed, args.demo_model,
                     dict(tonic_current=model.tonic_current, synaptic_gain=model.synaptic_gain))
@@ -213,12 +261,16 @@ async def run(args) -> None:
     http = start_http(project, model, args.http_port, args.ws_port)
     ws_server = await serve(ws_handler, "127.0.0.1", args.ws_port, max_size=None)
     url = f"http://127.0.0.1:{args.http_port}/"
-    print(f"Fly64 dashboard: {url}")
-    print(f"Fly64 model: {model.label}; {model.n:,} neurons; {model.w.nnz:,} edges")
+    print(f"Fly Sonic dashboard: {url}", flush=True)
+    print(f"Fly Sonic model: {model.label}; {model.n:,} neurons; {model.w.nnz:,} edges", flush=True)
+    print(f"Fly Sonic bridge: {bridge.path}", flush=True)
     dashboard_process = open_dashboard(url, project) if not args.no_browser else None
     broadcast_task = asyncio.create_task(broadcaster())
     stopping = asyncio.Event()
-    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, stopping.set)
+    try:
+        asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, stopping.set)
+    except (NotImplementedError, AttributeError):  # Windows: Ctrl+C / terminate only
+        pass
     log_path = args.record.with_suffix(".jsonl")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = log_path.open("w", buffering=1)
@@ -257,7 +309,7 @@ async def run(args) -> None:
                 dash_seq += 1
                 activity = np.clip((np.clip(model.v, 0, 1) * 0.35 + model.activity * 0.65) * 255, 0, 255).astype(np.uint8)
                 header = DASH_HEADER.pack(
-                    b"F64D", dash_seq, tick_start, control.x, control.y, int(pending_jump),
+                    DASH_MAGIC, dash_seq, tick_start, control.x, control.y, int(pending_jump),
                     rtf, latency_ms,
                     dropped, model.n, len(all_spikes), WIDTH, HEIGHT,
                 )
@@ -271,10 +323,12 @@ async def run(args) -> None:
                     except asyncio.QueueEmpty:
                         pass
                 packet_queue.put_nowait(packet)
+                status = bridge.game_status()
                 log.write(json.dumps(dict(wall_s=tick_start-started, steps=model.step_count, rtf=rtf,
-                    latency_ms=latency_ms, rss_mb=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1e6,
+                    latency_ms=latency_ms, rss_mb=rss_mb(),
                     x=control.x, y=control.y, jump=pending_jump, frame_seq=last_frame_seq,
-                    dropped=dropped, visual_contrast=model.temporal_energy)) + "\n")
+                    dropped=dropped, visual_contrast=model.temporal_energy,
+                    game_state=status["state"], game_x=status["x"], game_y=status["y"])) + "\n")
                 pending_jump = False
 
             next_tick += model.dt
@@ -297,22 +351,23 @@ async def run(args) -> None:
             dashboard_process.terminate()
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Run the Fly64 neural closed loop")
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Run the Fly Sonic neural closed loop")
     parser.add_argument("--bridge", type=Path, required=True)
     parser.add_argument("--record", type=Path, required=True)
     parser.add_argument("--demo-model", action="store_true")
     parser.add_argument("--synthetic", action="store_true")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--start-disabled", action="store_true", help="start with neural control off (F6 in the game turns it on)")
     parser.add_argument("--duration", type=float, default=0, help="seconds; zero runs until interrupted")
     parser.add_argument("--http-port", type=int, default=8765)
     parser.add_argument("--ws-port", type=int, default=8766)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main():
+def main(argv=None):
     try:
-        asyncio.run(run(parse_args()))
+        asyncio.run(run(parse_args(argv)))
     except KeyboardInterrupt:
         pass
 
