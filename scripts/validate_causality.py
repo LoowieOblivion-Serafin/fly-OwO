@@ -25,7 +25,13 @@ def run(frames: np.ndarray, connected: bool):
 
 def main():
     index = json.loads((ROOT / "artifacts/latest-replay.index.json").read_text())
-    source = np.concatenate([np.load(ROOT / "artifacts" / p)["frames"] for p in index["chunks"][:3]])
+    if index.get("schema") != 3:
+        raise ValueError("Record a new first-person run before testing causality")
+    sequences = []
+    for name in index["chunks"][:3]:
+        with np.load(ROOT / "artifacts" / name) as chunk:
+            sequences.append(chunk["frames"][chunk["frame_indices"]])
+    source = np.concatenate(sequences)
     source = source[np.flatnonzero(source.mean(axis=(1,2,3)) > 20)[0]:]
     sample = source[:1000]
     frozen = np.repeat(sample[:1], len(sample), axis=0)

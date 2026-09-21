@@ -12,7 +12,11 @@ import UniformTypeIdentifiers
         print("duration_seconds=\(duration.seconds), size=\(try await tracks[0].load(.naturalSize))")
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
-        let image = try await generator.image(at: CMTime(seconds: Double(args[3])!, preferredTimescale: 600)).image
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let sample = try await generator.image(at: CMTime(seconds: Double(args[3])!, preferredTimescale: 600))
+        let image = sample.image
+        print("sample_time_seconds=\(sample.actualTime.seconds)")
         let destination = CGImageDestinationCreateWithURL(URL(fileURLWithPath: args[2]) as CFURL, UTType.png.identifier as CFString, 1, nil)!
         CGImageDestinationAddImage(destination, image, nil)
         guard CGImageDestinationFinalize(destination) else { fatalError("Could not save video frame") }

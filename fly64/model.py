@@ -7,6 +7,7 @@ import time
 
 import numpy as np
 from scipy import sparse
+from .retina import SphericalRetina
 
 
 @dataclass
@@ -44,7 +45,8 @@ class FlyModel:
         self.w = self.w.tocsc()
         self.spikes = np.zeros(self.n, dtype=np.float32)
         self.activity = np.zeros(self.n, dtype=np.float32)
-        self.previous_rgb = np.zeros((48, 64, 3), dtype=np.float32)
+        self.retina = SphericalRetina(self.visual_pixels)
+        self.previous_rgb = np.zeros((len(self.visual), 3), dtype=np.float32)
         self.history = deque(maxlen=13)
         self.motor_nodes = np.concatenate((self.forward, self.turn_left, self.turn_right, self.jump_nodes))
         self.motor_splits = np.cumsum([len(self.forward), len(self.turn_left), len(self.turn_right)])
@@ -89,6 +91,7 @@ class FlyModel:
         cost = self.rng.uniform(-1, 1, self.n)
         rad = np.sqrt(1 - cost * cost)
         self.positions = np.column_stack((rad * np.cos(phi), cost * 0.65, rad * np.sin(phi))).astype(np.float32)
+        self.position_measured = np.zeros(self.n, dtype=bool)
         self.regions = (np.arange(self.n) % 8).astype(np.uint8)
         self.region_names = np.array([f"fixture group {i}" for i in range(8)])
 
@@ -99,6 +102,7 @@ class FlyModel:
         for name in ("visual", "forward", "turn_left", "turn_right", "jump_nodes", "positions", "regions"):
             setattr(self, name, meta[name])
         self.region_names = meta["region_names"]
+        self.position_measured = meta["position_measured"]
         if "visual_pixels" in meta:
             self.visual_pixels = meta["visual_pixels"]
         else:
@@ -106,7 +110,7 @@ class FlyModel:
             self.visual_pixels = np.column_stack((flat_pixels // 64, flat_pixels % 64)).astype(np.uint8)
 
     def encode_retina(self, rgb: np.ndarray) -> np.ndarray:
-        frame = rgb.astype(np.float32) / 255.0
+        frame = self.retina.sample(rgb)
         lum = frame @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
         prev_lum = self.previous_rgb @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
         temporal = np.abs(lum - prev_lum)
@@ -115,7 +119,7 @@ class FlyModel:
         self.previous_rgb = frame
         self.mean_luminance = float(lum.mean())
         self.temporal_energy = float(temporal.mean())
-        return drive[self.visual_pixels[:, 0], self.visual_pixels[:, 1]]
+        return drive
 
     def step(self, rgb: np.ndarray, now: float | None = None) -> tuple[Control, np.ndarray]:
         now = self.step_count * self.dt if now is None else now

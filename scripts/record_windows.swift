@@ -28,7 +28,7 @@ final class RecordingDelegate: NSObject, SCRecordingOutputDelegate {
         }
         let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
         let windows = content.windows.filter {
-            ($0.owningApplication?.processID == gamePID ||
+            (($0.owningApplication?.processID == gamePID && $0.title == "Super Mario 64 EX (OpenGL)") ||
              ($0.owningApplication?.processID == chromePID && $0.title == "Fly64 Neural Observatory")) &&
             $0.frame.width > 200 && $0.frame.height > 200
         }

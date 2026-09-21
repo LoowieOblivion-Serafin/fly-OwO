@@ -4,10 +4,13 @@ import json
 from pathlib import Path
 import numpy as np
 from .model import FlyModel
+from .retina import CALIBRATION
 
 
 def verify(index: Path, cache: Path):
     manifest = json.loads(index.read_text())
+    if manifest.get("schema") != 3 or manifest.get("retina") != CALIBRATION:
+        raise ValueError("Replay requires schema 3 and the exact spherical retinal calibration")
     model = FlyModel(cache, demo=manifest["fixture"], seed=manifest["seed"])
     for name in ("tonic_current", "synaptic_gain"):
         if name in manifest.get("parameters", {}):
@@ -16,7 +19,8 @@ def verify(index: Path, cache: Path):
     for name in manifest["chunks"]:
         with np.load(index.parent / name) as archive:
             data = {key: archive[key] for key in archive.files}
-        for i, (t, frame, expected) in enumerate(zip(data["timestamps"], data["frames"], data["controls"])):
+        for i, (t, frame_index, expected) in enumerate(zip(data["timestamps"], data["frame_indices"], data["controls"])):
+            frame = data["frames"][frame_index]
             control, spikes = model.step(frame, float(t))
             actual = (control.x, control.y, int(control.jump))
             if not np.array_equal(actual, expected):

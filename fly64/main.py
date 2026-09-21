@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import struct
 import subprocess
 import tempfile
 import threading
@@ -22,15 +21,15 @@ from websockets.asyncio.server import serve
 
 from .bridge import CHANNELS, HEIGHT, WIDTH, SharedBridge
 from .model import FlyModel
-
-DASH_HEADER = struct.Struct("<4sIdbbBffIIIHH")
-
+from .retina import BASES, CALIBRATION
+from .telemetry import Observatory
 
 class DashboardHTTP(BaseHTTPRequestHandler):
     html = b""
     positions = b""
     metadata = b"{}"
     bridge = None
+    assets = {}
 
     def do_GET(self):
         path = urlsplit(self.path).path
@@ -40,6 +39,8 @@ class DashboardHTTP(BaseHTTPRequestHandler):
             body, mime = self.positions, "application/octet-stream"
         elif path == "/metadata.json":
             body, mime = self.metadata, "application/json"
+        elif path in self.assets:
+            body, mime = self.assets[path]
         elif path == "/bridge-status.json" and self.bridge is not None:
             body, mime = json.dumps(self.bridge.game_status()).encode(), "application/json"
         else:
@@ -84,23 +85,19 @@ class SyntheticWorld:
             self.jump_phase += 0.12
             if self.jump_phase > np.pi:
                 self.jump_phase = 0
-        yy, xx = np.mgrid[0:HEIGHT, 0:WIDTH]
-        sky = np.zeros((HEIGHT, WIDTH, 3), np.float32)
-        horizon = 25 + int(3 * np.sin(self.heading))
-        sky[:horizon, :, :] = (80, 165, 245)
-        sky[horizon:, :, :] = (70, 155, 72)
-        # Moving high-contrast scenery makes temporal visual input causal.
-        center = int(WIDTH / 2 + 19 * np.sin(self.heading + self.distance * 0.2))
-        tree = (np.abs(xx - center) < 3) & (yy > 10) & (yy < horizon + 10)
-        sky[tree] = (82, 48, 25)
-        crown = (xx - center) ** 2 + (yy - 10) ** 2 < 55
-        sky[crown] = (30, 112, 35)
-        stripe = ((xx + int(self.distance * 7)) % 22 < 3) & (yy > horizon)
-        sky[stripe] = (205, 190, 95)
-        lift = int(5 * np.sin(self.jump_phase)) if self.jump_phase else 0
-        mario = (np.abs(xx - WIDTH // 2) < 3) & (yy > 31 - lift) & (yy < 42 - lift)
-        sky[mario] = (225, 35, 35)
-        return sky.astype(np.uint8)
+        image = np.empty((HEIGHT, WIDTH, 3), np.uint8)
+        yy, xx = np.mgrid[0:128, 0:128]
+        u, v = (xx+.5)/64-1, 1-(yy+.5)/64
+        for face, (right, up, forward) in enumerate(BASES):
+            rays = forward + u[...,None]*right + v[...,None]*up
+            az = np.arctan2(rays[...,0], rays[...,2]) + self.heading
+            el = rays[...,1]/np.linalg.norm(rays,axis=-1)
+            ground = el < .04*np.sin(self.jump_phase)
+            color = np.where(ground[...,None], [70,155,72], [80,165,245]).astype(np.uint8)
+            stripe = (np.sin(az*8+self.distance)>.8) & (np.abs(el)<.6)
+            color[stripe] = [82,48,25]
+            image[(face//3)*128:(face//3+1)*128,(face%3)*128:(face%3+1)*128] = color
+        return image
 
 
 class Replay:
@@ -116,13 +113,19 @@ class Replay:
         self.frames: list[np.ndarray] = []
         self.controls: list[tuple[int, int, int]] = []
         self.spikes: list[np.ndarray] = []
+        self.frame_indices: list[int] = []
+        self.camera: list[tuple] = []
 
-    def add(self, timestamp, frame, control, spikes):
+    def add(self, timestamp, frame, control, spikes, camera=None):
         self.times.append(timestamp)
-        self.frames.append(frame.copy())
+        if not self.frames or not np.array_equal(frame, self.frames[-1]):
+            self.frames.append(frame.copy())
+        self.frame_indices.append(len(self.frames)-1)
+        self.camera.append(tuple((camera or {}).get("pose", [0.,0.,0.,0.])) +
+                           ((camera or {}).get("game_frame", 0),))
         self.controls.append((control.x, control.y, int(control.jump)))
         self.spikes.append(spikes.astype(np.uint32))
-        if len(self.frames) >= 500:
+        if len(self.times) >= 500:
             self.save()
 
     def save(self):
@@ -134,16 +137,29 @@ class Replay:
             offsets[i + 1] = offsets[i] + len(values)
         flat = np.concatenate(self.spikes) if offsets[-1] else np.empty(0, np.uint32)
         target = self.path.with_name(f"{self.path.stem}-{len(self.chunks):05d}.npz")
-        self.writes.append(self.writer.submit(np.savez_compressed,
-            target, timestamps=np.asarray(self.times), frames=np.asarray(self.frames),
+        payload = dict(timestamps=np.asarray(self.times), frames=np.asarray(self.frames),
+            frame_indices=np.asarray(self.frame_indices, np.uint32), camera=np.asarray(self.camera),
             controls=np.asarray(self.controls, np.int8), spike_offsets=offsets, spikes=flat,
-            seed=np.int64(self.seed), fixture=np.bool_(self.fixture), schema=np.int64(2),
-        ))
+            seed=np.int64(self.seed), fixture=np.bool_(self.fixture), schema=np.int64(3),
+        )
         self.chunks.append(target.name)
-        self.path.with_suffix(".index.json").write_text(json.dumps(dict(schema=2,
+        manifest = dict(schema=3, retina=CALIBRATION,
             seed=self.seed, fixture=self.fixture, parameters=self.parameters,
-            chunks=self.chunks), indent=2))
+            chunks=list(self.chunks))
+        self.writes.append(self.writer.submit(self._write_chunk, target, payload, manifest))
         self.times.clear(); self.frames.clear(); self.controls.clear(); self.spikes.clear()
+        self.frame_indices.clear(); self.camera.clear()
+
+    def _write_chunk(self, target, payload, manifest):
+        # Publish only complete archives; readers never see a half-written NPZ.
+        temporary = target.with_suffix(".npz.partial")
+        with temporary.open("wb") as output:
+            np.savez_compressed(output, **payload)
+        temporary.replace(target)
+        index = self.path.with_suffix(".index.json")
+        temporary_index = index.with_suffix(".json.partial")
+        temporary_index.write_text(json.dumps(manifest, indent=2))
+        temporary_index.replace(index)
 
     def close(self):
         self.save()
@@ -155,8 +171,15 @@ class Replay:
 def start_http(project: Path, model, port: int, ws_port: int) -> ThreadingHTTPServer:
     DashboardHTTP.html = (project / "web" / "index.html").read_bytes()
     DashboardHTTP.positions = model.positions.astype("<f4", copy=False).tobytes()
+    DashboardHTTP.assets = {
+        "/dashboard.js": ((project / "web/dashboard.js").read_bytes(), "text/javascript"),
+        "/dashboard.css": ((project / "web/dashboard.css").read_bytes(), "text/css"),
+        "/measured.bin": (model.position_measured.astype(np.uint8).tobytes(), "application/octet-stream"),
+    }
     DashboardHTTP.metadata = json.dumps(dict(n=model.n, ws=ws_port, label=model.label,
-        region_names=model.region_names.tolist())).encode()
+        region_names=model.region_names.tolist(), retina=CALIBRATION,
+        measured=int(model.position_measured.sum()),
+        groups={key: ids.tolist() for key, ids in Observatory(model).groups.items()})).encode()
     server = LocalHTTPServer(("127.0.0.1", port), DashboardHTTP)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
@@ -193,7 +216,7 @@ async def run(args) -> None:
     latest_control = None
     last_frame_seq = -1
     dropped = 0
-    pending_spikes = []
+    observatory = Observatory(model)
     pending_jump = False
     dash_seq = 0
 
@@ -222,7 +245,6 @@ async def run(args) -> None:
     log_path = args.record.with_suffix(".jsonl")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = log_path.open("w", buffering=1)
-    region_sizes = np.bincount(model.regions, minlength=len(model.region_names))
 
     try:
         next_tick = time.monotonic()
@@ -243,38 +265,29 @@ async def run(args) -> None:
             control, spikes = model.step(frame, model.step_count * model.dt)
             latest_control = control
             bridge.write_control(control.x, control.y, control.jump)
-            replay.add((model.step_count - 1) * model.dt, frame, control, spikes)
-            pending_spikes.append(spikes)
+            replay.add((model.step_count - 1) * model.dt, frame, control, spikes, bridge.frame_metadata)
+            observatory.observe(frame, seq, control, spikes, bridge.game_status())
             pending_jump |= control.jump
             latency_ms = (time.monotonic() - tick_start) * 1000
             rtf = model.step_count * model.dt / max(time.monotonic() - started, .02)
 
             if tick_start - last_publish >= (0.2 if rtf < 0.95 else 0.1):
-                publish_ticks = len(pending_spikes)
-                all_spikes = np.concatenate(pending_spikes).astype("<u4")
-                pending_spikes.clear()
                 last_publish = tick_start
                 dash_seq += 1
-                activity = np.clip((np.clip(model.v, 0, 1) * 0.35 + model.activity * 0.65) * 255, 0, 255).astype(np.uint8)
-                header = DASH_HEADER.pack(
-                    b"F64D", dash_seq, tick_start, control.x, control.y, int(pending_jump),
-                    rtf, latency_ms,
-                    dropped, model.n, len(all_spikes), WIDTH, HEIGHT,
-                )
-                rates = (np.bincount(model.regions[all_spikes], minlength=len(region_sizes)) /
-                         np.maximum(region_sizes * publish_ticks * model.dt, 1)).astype("<f4")
-                packet = header + frame.tobytes() + activity.tobytes() + all_spikes.tobytes() + rates.tobytes()
                 if packet_queue.full():
                     try:
                         packet_queue.get_nowait()
                         dropped += 1
                     except asyncio.QueueEmpty:
                         pass
+                packet = observatory.packet(dash_seq, rtf=rtf, latency_ms=latency_ms, dropped=dropped,
+                    rss_mb=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1e6)
                 packet_queue.put_nowait(packet)
                 log.write(json.dumps(dict(wall_s=tick_start-started, steps=model.step_count, rtf=rtf,
                     latency_ms=latency_ms, rss_mb=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1e6,
                     x=control.x, y=control.y, jump=pending_jump, frame_seq=last_frame_seq,
-                    dropped=dropped, visual_contrast=model.temporal_energy)) + "\n")
+                    dropped=dropped, visual_contrast=model.temporal_energy,
+                    camera=bridge.frame_metadata, game=bridge.game_status())) + "\n")
                 pending_jump = False
 
             next_tick += model.dt
