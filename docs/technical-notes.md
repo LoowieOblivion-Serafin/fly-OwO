@@ -1,6 +1,11 @@
-# Technical notes
+# Fly Sonic technical notes
 
 For the short install/run instructions, see [the README](../README.md) (Spanish).
+These notes describe `flysonic/` and the SRB2 bridge. The separately retained
+`fly64/` implementation uses first-person compound-eye vision and has its own
+[technical notes](fly64-technical-notes.md) and [dashboard design](dashboard-design.md).
+Merging the upstream files does not change Sonic's 64×48 retinal input, LIF
+dynamics, bridge, or replay schema.
 
 Measured connectome wiring does **not** establish recovered fly physiology,
 behavior, experience, or consciousness. Dynamics, visual projection and the
@@ -65,7 +70,8 @@ seed 64. Voltage threshold 1 resets to 0. Retinal current is injected **only**
 into photoreceptors. Global tonic current and synaptic gain were calibrated (by the
 Fly64 author) to make visual perturbations observable downstream; they are not
 measured physiological parameters. Luminance, green opponency and absolute temporal
-contrast form the retinal drive. The model code is unchanged from Fly64.
+contrast form the retinal drive. Sonic retains the model version used in the
+initial adaptation; later upstream vision changes are confined to `fly64/`.
 
 A 13-tick (~260 ms) descending-neuron spike window produces a game-agnostic
 motor state `Control(x, y, jump)`:
@@ -90,7 +96,8 @@ Neural updates target 50 Hz, framebuffer capture 10 Hz, SRB2 ticks at 35 Hz.
 Dashboard publishing drops from 10 to 5 Hz below 0.95 real-time factor. Neural
 updates and graph edges are never discarded to catch up.
 
-The dashboard shows retinal input, membrane/spike activity, spike density,
+The Sonic dashboard (`web/sonic/index.html`, served at the local server root)
+shows retinal input, membrane/spike activity, spike density,
 superclass rates, intent avatar and requested controls. **Game received**
 independently reports the game-applied controller state (and SRB2 telemetry:
 rings, lives, map, level time, speed, position). A moving dashboard stick alone
@@ -153,13 +160,17 @@ detection. `scripts/validate_causality.py` compares live/frozen/disconnected
 frames with the same seed on the full model and requires different motor outputs
 for the connected trials.
 
-Verified so far: Linux x86-64 (Ubuntu 24.04 container, headless). The Windows
-build path (MSYS2 UCRT64) is scripted and the Windows branch of `fly_bridge.c`
-compiles with MinGW, but a full Windows run is still to be confirmed on a real PC.
+The initial Linux x86-64 validation used an Ubuntu 24.04 headless container.
+The subsequent Windows run, replay verification, and dated startup incident
+are recorded in [Windows validation](windows-validation.md). Those historical
+results do not replace validation after an upstream merge. See the
+[integration procedure](upstream-integration.md) for the checks to run on both
+Python packages; native Mario validation still requires its supported setup
+and the user's own ROM.
 
 ## Attribution and private assets
 
-Fly64: Jessica Paquette, https://github.com/barrelshifter/fly64 (model, data
+Fly64: Jessica Paquette, https://github.com/ornata/fly (model, data
 pipeline, dashboard and bridge design).
 
 MaleCNS: Berg et al., *Sexual dimorphism in the complete connectome of the

@@ -3,11 +3,30 @@
 Un modelo del cerebro de una mosca (el conectoma **MaleCNS**, 166 700 neuronas
 con su cableado medido) jugando **Sonic Robo Blast 2** en lugar de Super Mario 64.
 
-Es un fork de [Fly64](https://github.com/barrelshifter/fly64) de Jessica Paquette
+Es un fork de [Fly64](https://github.com/ornata/fly) de Jessica Paquette
 ([tweet original](https://x.com/barrelshifter/status/2097004115826200898)), que
 hizo lo mismo con Mario. El cerebro es el mismo; lo que cambia es el "cuerpo":
 en vez de parchear `sm64ex` se parchea SRB2, que es software libre (GPLv2) y cuyos
 datos se distribuyen gratis, así que **no hace falta ningún ROM**.
+
+La rama `main` conserva las actualizaciones del proyecto original y `sonic`
+contiene esta adaptación. Esta rama también conserva `fly64/` y su lanzador
+para poder incorporar los cambios de la autora sin sustituir el cuerpo de Sonic.
+El nuevo ojo compuesto en primera persona y el nuevo dashboard de upstream
+pertenecen a **Fly64/Mario**. **Sonic conserva su imagen de pantalla de 64 × 48,
+su puente SRB2 y la dinámica LIF que ya usaba**; esos cambios de visión todavía
+no están portados a SRB2.
+
+| Variante | Lanzador | Código | Interfaz servida |
+| --- | --- | --- | --- |
+| Fly Sonic | `python run_flysonic.py` | `flysonic/` | `web/sonic/index.html` |
+| Fly64 original | `./run-fly64 --rom "/ruta/rom.us.z64"` (macOS) | `fly64/` | `web/index.html`, `web/dashboard.css`, `web/dashboard.js` |
+
+Ambos lanzadores sirven su propia interfaz en <http://127.0.0.1:8765/>.
+Cierra una demo antes de iniciar la otra: comparten puertos y bloqueo de ejecución.
+Sonic guarda sus registros en `artifacts/latest-replay.*`; Mario, en
+`artifacts/fly64/latest-replay.*`. Cada variante reutiliza sus propios nombres:
+copia el conjunto completo si necesitas conservar una sesión.
 
 ```text
 Pantalla de SRB2 → fotorreceptores R1-R8 → red MaleCNS (LIF) → neuronas descendentes → mando de Sonic → pantalla
@@ -135,7 +154,9 @@ columnas ópticas publicadas por los autores de MaleCNS cuando existen).
 La red es MaleCNS v1.0: 166 700 neuronas y 25.6 millones de conexiones medidas. La
 dinámica es una integración-y-disparo simple (50 pasos por segundo) con ruido
 reproducible y una corriente de fondo; GABA, glutamato e histamina se tratan como
-inhibitorios. Todo esto viene tal cual de Fly64 (`flysonic/model.py`, `flysonic/data.py`).
+inhibitorios. Esta variante conserva el modelo de la versión de Fly64 usada
+para la adaptación inicial (`flysonic/model.py`, `flysonic/data.py`). Los cambios
+posteriores de visión y observación de upstream viven en `fly64/`.
 
 ### Algunas señales se vuelven el mando de Sonic
 
@@ -175,6 +196,38 @@ se mueve, y que suelta los controles cuando el modelo se calla. Se salta solo si
 compilaste SRB2 (`--build-only`).
 
 Más detalles, límites y el formato exacto del puente: [docs/technical-notes.md](docs/technical-notes.md).
+
+## Fly64/Mario y actualizaciones del proyecto original
+
+La versión original usa macOS, Homebrew, Chrome y herramientas de desarrollo.
+Requiere tu propia ROM US sin modificar de Super Mario 64, obtenida legalmente;
+el repositorio no la incluye. Es una opción independiente y no se necesita para Sonic.
+Consulta las [instrucciones originales de Fly64](docs/fly64-readme.md), sus
+[notas técnicas](docs/fly64-technical-notes.md) y el
+[diseño de su dashboard](docs/dashboard-design.md).
+
+Para incorporar actualizaciones futuras, primero guarda tus cambios en un commit
+y revisa `git status`. Configura `upstream` una sola vez si aún no existe:
+
+```sh
+git remote -v
+git remote add upstream https://github.com/ornata/fly.git
+```
+
+Después, desde la carpeta del clon:
+
+```sh
+git fetch upstream
+git switch sonic
+git merge upstream/main
+```
+
+Si Git anuncia conflictos, revisa cada archivo y conserva las dos variantes según
+su función. Antes de confirmar la fusión, verifica que `git diff --name-only
+--diff-filter=U` no liste archivos y ejecuta las pruebas. Solo entonces publica
+con `git push origin sonic`. No hace falta forzar el push ni reemplazar tu historial.
+El [procedimiento de integración](docs/upstream-integration.md) explica cómo
+resolver, comprobar o cancelar una fusión y cómo distinguir un push de un PR.
 
 ## Créditos y licencias
 

@@ -1,118 +1,27 @@
 <!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Fly Sonic Neural Observatory</title>
-<style>
-  :root { color-scheme: dark; --ink:#e4f3ff; --muted:#7ea3c4; --blue:#4fa3ff; --cyan:#41f6d2; --amber:#ffb454; --ring:#ffd23f; --panel:#0a1119cc; }
-  * { box-sizing:border-box } body { margin:0; overflow:hidden; background:radial-gradient(circle at 40% 20%,#12233a,#05080c 60%); color:var(--ink); font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
-  header { height:64px; display:flex; align-items:center; justify-content:space-between; padding:0 22px; border-bottom:1px solid #23344b; background:#070d14dd }
-  h1 { margin:0; font:600 22px system-ui; letter-spacing:.02em } .live { color:var(--cyan); text-transform:uppercase; letter-spacing:.12em }
-  #grid { display:grid; grid-template-columns:1.2fr 1fr; grid-template-rows:1fr 380px; gap:10px; padding:10px; height:calc(100vh - 64px) }
-  .panel { position:relative; min-height:0; overflow:hidden; border:1px solid #203247; border-radius:9px; background:var(--panel); box-shadow:0 12px 40px #0008 }
-  .title { position:absolute; z-index:2; top:12px; left:14px; color:#8fb3d6; text-transform:uppercase; letter-spacing:.08em; font-size:12px }
-  #brain { width:100%; height:100%; display:block } #retina { width:100%; height:100%; image-rendering:pixelated; object-fit:contain; padding:42px 14px 14px }
-  #raster { width:100%; height:100%; display:block }
-  #telemetry { padding:42px 18px 15px; display:grid; grid-template-rows:auto auto auto 1fr; gap:12px; overflow:auto }
-  .warning { color:#ffc87b; border-left:2px solid var(--amber); padding-left:9px; line-height:1.4 }
-  .stats { display:grid; grid-template-columns:1fr 1fr; gap:8px 20px } .stat b { display:block; color:var(--cyan); font-size:18px; margin-top:3px }
-  .game { display:grid; grid-template-columns:repeat(4,1fr); gap:6px 12px; padding:8px 10px; border:1px solid #1e3550; border-radius:7px; background:#0a1624 }
-  .game div { color:var(--muted); font-size:11px } .game b { display:block; color:var(--blue); font-size:16px; margin-top:2px } .game b.rings { color:var(--ring) }
-  .controller { display:flex; align-items:center; gap:20px } .stick { width:110px; height:110px; border:1px solid #38516b; border-radius:50%; position:relative; background:#071019 }
-  #nub { width:18px; height:18px; border-radius:50%; background:var(--cyan); box-shadow:0 0 16px var(--cyan); position:absolute; left:46px; top:46px }
-  .buttons { display:flex; flex-direction:column; gap:8px }
-  .btn { width:46px; height:46px; border-radius:50%; border:2px solid #944; display:grid; place-items:center; color:#f99; transition:.08s; font-weight:600 } .btn.on { background:#f65; color:#210; box-shadow:0 0 22px #f65 }
-  .btn.spin { border-color:#469; color:#9cf } .btn.spin.on { background:#5af; color:#012; box-shadow:0 0 22px #5af }
-  footer { position:absolute; right:14px; left:14px; bottom:10px; color:#8fb3d6; font-size:12px }
-  #rates { position:absolute; left:14px; bottom:10px; right:14px; font-size:12px; background:#060d14e8; padding:8px; line-height:1.6 }
-  #intent { font-size:36px; display:inline-block; transition:transform .1s }
-  @media(max-width:650px){body{overflow:auto}#grid{height:auto;grid-template-columns:1fr;grid-template-rows:420px 260px 260px 430px}header{height:auto;min-height:75px}h1{font-size:19px}}
-</style>
-</head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fly64 Neural Observatory</title><link rel="stylesheet" href="/dashboard.css"></head>
 <body>
-<header><div><h1>Fly Sonic Neural Observatory</h1><div id="label">loading model…</div></div><div id="status" class="live">● connecting</div></header>
-<main id="grid">
-  <section class="panel"><div class="title">Neural state · all cells</div><canvas id="brain"></canvas><footer>Measured soma positions + deterministic missing-position layout · modeled dynamics</footer></section>
-  <section class="panel"><div class="title">Fly retinal input · SRB2 framebuffer</div><canvas id="retina" width="64" height="48"></canvas></section>
-  <section class="panel"><div class="title">Spike density · 2 s · all cells binned</div><canvas id="raster"></canvas><div id="rates"></div></section>
-  <section class="panel" id="telemetry"><div class="title">Decoded motor state</div>
-    <div class="warning">Engineered dynamics and motor mapping; not validated fly physiology.<div id="applied">Game acknowledgement pending…</div></div>
-    <div class="stats">
-      <div class="stat">Neurons<b id="neurons">—</b></div><div class="stat">Spikes / update<b id="spikes">—</b></div>
-      <div class="stat">Neural latency<b id="latency">—</b></div><div class="stat">Real-time factor<b id="rtf">—</b></div>
-    </div>
-    <div class="game">
-      <div>Rings<b id="rings" class="rings">—</b></div><div>Map<b id="map">—</b></div><div>Level time<b id="ltime">—</b></div><div>Speed<b id="speed">—</b></div>
-      <div>Sonic x<b id="px">—</b></div><div>Sonic y<b id="py">—</b></div><div>Sonic z<b id="pz">—</b></div><div>Lives<b id="lives">—</b></div>
-    </div>
-    <div class="controller"><div class="stick"><div id="nub"></div></div><div class="buttons"><div id="jump" class="btn">JMP</div><div id="spin" class="btn spin">SPN</div></div><div><div>turn <b id="sx">0</b></div><div>forward <b id="sy">0</b></div><div>dropped <b id="drop">0</b></div><div><span id="intent" aria-label="Fly intent avatar">🪰</span></div></div></div>
-  </section>
-</main>
-<script type="module">
-const meta=await fetch('/metadata.json').then(r=>r.json()), N=meta.n, wsPort=meta.ws;
-const statusEl=document.querySelector('#status');
-document.querySelector('#label').textContent=meta.label;
-document.querySelector('#neurons').textContent=N.toLocaleString();
-const brain=document.querySelector('#brain'), gl=brain.getContext('webgl',{antialias:true});
-let positions,activity=new Uint8Array(N),program,posBuf,actBuf,start=performance.now();
-function shader(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw gl.getShaderInfoLog(s);return s}
-function initGL(pos){positions=pos;program=gl.createProgram();gl.attachShader(program,shader(gl.VERTEX_SHADER,`attribute vec3 p;attribute float a;uniform float t;uniform float aspect;varying float v;void main(){float c=cos(t),s=sin(t);vec3 q=vec3(c*p.x+s*p.z,p.y,-s*p.x+c*p.z);gl_Position=vec4(q.x*.68/aspect,q.y*.68,q.z*.08,1.0);v=a;gl_PointSize=1.0+1.5*a;}`));gl.attachShader(program,shader(gl.FRAGMENT_SHADER,`precision mediump float;varying float v;void main(){float d=length(gl_PointCoord-.5);if(d>.5)discard;gl_FragColor=mix(vec4(.15,.45,.75,.42),vec4(1.,.58,.18,1.),smoothstep(.4,1.,v));}`));gl.linkProgram(program);gl.useProgram(program);posBuf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,posBuf);gl.bufferData(gl.ARRAY_BUFFER,pos,gl.STATIC_DRAW);let l=gl.getAttribLocation(program,'p');gl.enableVertexAttribArray(l);gl.vertexAttribPointer(l,3,gl.FLOAT,false,0,0);actBuf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,actBuf);gl.bufferData(gl.ARRAY_BUFFER,N,gl.DYNAMIC_DRAW);l=gl.getAttribLocation(program,'a');gl.enableVertexAttribArray(l);gl.vertexAttribPointer(l,1,gl.UNSIGNED_BYTE,true,0,0);requestAnimationFrame(drawBrain)}
-function drawBrain(now){const d=devicePixelRatio||1,w=brain.clientWidth*d,h=brain.clientHeight*d;if(brain.width!==w||brain.height!==h){brain.width=w;brain.height=h}gl.viewport(0,0,w,h);gl.clearColor(.02,.04,.07,1);gl.clear(gl.COLOR_BUFFER_BIT);gl.useProgram(program);gl.uniform1f(gl.getUniformLocation(program,'t'),(now-start)*.00012);gl.uniform1f(gl.getUniformLocation(program,'aspect'),w/h);gl.bindBuffer(gl.ARRAY_BUFFER,actBuf);gl.bufferSubData(gl.ARRAY_BUFFER,0,activity);gl.drawArrays(gl.POINTS,0,N);requestAnimationFrame(drawBrain)}
-fetch('/positions.bin').then(r=>r.arrayBuffer()).then(b=>initGL(new Float32Array(b)));
-const retina=document.querySelector('#retina'),rx=retina.getContext('2d'),image=rx.createImageData(64,48);
-const raster=document.querySelector('#raster'),rc=raster.getContext('2d');let columns=[];
-function drawRaster(){
- const d=devicePixelRatio||1,w=raster.clientWidth*d,h=raster.clientHeight*d;
- if(raster.width!==w||raster.height!==h){raster.width=w;raster.height=h}
- rc.fillStyle='#060d14';rc.fillRect(0,0,w,h);
- const now=performance.now();columns=columns.filter(col=>now-col.time<2000);
- for(const col of columns){const x=(1-(now-col.time)/2000)*w;
-  const bins=new Uint32Array(180);
-  for(let k=0;k<col.sp.length;k++)bins[Math.min(179,Math.floor(col.sp[k]/N*180))]++;
-  for(let k=0;k<180;k++){const a=Math.min(1,Math.log1p(bins[k])/7);rc.fillStyle=`rgba(79,163,255,${a})`;rc.fillRect(x-w/20,40*d+k/180*(h-120*d),w/20,(h-120*d)/180);}
- }requestAnimationFrame(drawRaster);
-}requestAnimationFrame(drawRaster);
-function connect(){
- const ws=new WebSocket(`ws://127.0.0.1:${wsPort}`);ws.binaryType='arraybuffer';
- ws.onopen=()=>{statusEl.textContent='● live';statusEl.className='live'};
- ws.onclose=()=>{statusEl.textContent='● disconnected';setTimeout(connect,800)};
- ws.onmessage=e=>{
-  const b=e.data,v=new DataView(b);
-  if(String.fromCharCode(...new Uint8Array(b,0,4))!=='FLYS')return;
-  const x=v.getInt8(16),y=v.getInt8(17),jump=v.getUint8(18),rtf=v.getFloat32(19,true),lat=v.getFloat32(23,true),drop=v.getUint32(27,true),n=v.getUint32(31,true),ns=v.getUint32(35,true),w=v.getUint16(39,true),h=v.getUint16(41,true);
-  let off=43,pix=new Uint8Array(b,off,w*h*3);off+=w*h*3;
-  activity=new Uint8Array(b,off,n);off+=n;
-  const sp=new Uint32Array(b.slice(off,off+ns*4));off+=ns*4;
-  columns.push({sp,time:performance.now()});
-  const rates=new Float32Array(b.slice(off));
-  document.querySelector('#rates').textContent='Superclass rates · '+meta.region_names.map((name,i)=>({name,rate:rates[i]})).sort((a,b)=>b.rate-a.rate).slice(0,3).map(a=>a.name+': '+a.rate.toFixed(1)+' Hz').join(' · ');
-  for(let i=0,j=0;i<pix.length;i+=3,j+=4){image.data[j]=pix[i];image.data[j+1]=pix[i+1];image.data[j+2]=pix[i+2];image.data[j+3]=255}
-  rx.putImageData(image,0,0);
-  document.querySelector('#spikes').textContent=ns.toLocaleString();
-  document.querySelector('#latency').textContent=lat.toFixed(1)+' ms';
-  document.querySelector('#rtf').textContent=rtf.toFixed(2)+'×';
-  document.querySelector('#sx').textContent=x;document.querySelector('#sy').textContent=y;
-  document.querySelector('#drop').textContent=drop;
-  document.querySelector('#nub').style.transform=`translate(${x/70*40}px,${-y/70*40}px)`;
-  document.querySelector('#intent').style.transform=`rotate(${x}deg) translateY(${jump?-16:-y/10}px)`;
-  document.querySelector('#jump').classList.toggle('on',!!jump);
- };
-}connect();
-const STATES=['Neural control disabled (F6 in the game enables it)','','STALE CONTROLLER — released','Packet rejected (torn)','GAME NOT CONNECTED','Game paused / not in a level'];
-function fmtTime(t){const s=Math.floor(t/35);return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`}
-setInterval(async()=>{try{
-  const s=await fetch('/bridge-status.json').then(r=>r.json());
-  document.querySelector('#applied').textContent=s.state===1?`Game received: turn ${s.x}, forward ${s.y}${s.jump?' · JUMP':''}${s.spin?' · SPIN':''}`:STATES[s.state]||'…';
-  document.querySelector('#spin').classList.toggle('on',!!s.spin);
-  const g=s.game||{};const live=g.in_level&&s.state!==4;
-  document.querySelector('#rings').textContent=live?g.rings:'—';
-  document.querySelector('#lives').textContent=live?(g.lives>=127?'∞':g.lives):'—';
-  document.querySelector('#map').textContent=live?('MAP'+String(g.map).padStart(2,'0')):'—';
-  document.querySelector('#ltime').textContent=live?fmtTime(g.leveltime):'—';
-  document.querySelector('#speed').textContent=live?g.speed:'—';
-  document.querySelector('#px').textContent=live?g.x:'—';document.querySelector('#py').textContent=live?g.y:'—';document.querySelector('#pz').textContent=live?g.z:'—';
-}catch{}},250);
-</script>
-</body>
-</html>
+<header><div><h1>Fly64 <span id="model">Connecting…</span></h1></div><div class="session"><span id="status" role="status">Connecting</span><button id="freeze" disabled>Freeze display</button></div></header>
+<main>
+<section aria-labelledby="vision-title">
+<div class="section-head"><h2 id="vision-title">Vision</h2><span id="frameAge">Waiting for frames</span></div>
+<div class="eyes">
+<figure><figcaption>Input <span>L / R</span></figcaption><canvas id="retina" width="256" height="128" aria-label="Live left and right fly-eye previews"></canvas></figure>
+<figure><figcaption>Frame difference <span>0–100%</span></figcaption><canvas id="change" width="256" height="128" aria-label="Absolute brightness change between successive frames"></canvas></figure>
+<div class="eye-note"><p id="contrast">Waiting for two frames.</p><p id="visualRate">Eye-cell activity: —</p><p class="muted">First person · RGB · 270°<br>Difference = brightness, not flow.</p></div>
+</div></section>
+<section aria-labelledby="motor-title">
+<div class="section-head"><h2 id="motor-title">Neurons → controls</h2><span>10 s · Hz = spikes / cell / s · 260 ms window</span></div>
+<div id="decision" class="decision">Waiting for neural samples…</div>
+<div class="chart-row"><div class="chart-label"><strong>Forward pool</strong><span>DNg100 · spikes / cell / s</span><output id="forwardValue">—</output></div><canvas id="forwardChart" role="img" aria-label="Forward firing rate, zero to ten hertz, gate at point four hertz; triangles mark overflow"></canvas></div>
+<div class="chart-row"><div class="chart-label"><strong>Steering pools</strong><span>DNa02 + DNg13 · Hz</span><output id="steeringValue">—</output></div><canvas id="steeringChart" role="img" aria-label="Left and right pool rates, zero to ten hertz; triangles mark overflow"></canvas></div>
+<div class="chart-row"><div class="chart-label"><strong>Jump pool</strong><span>DNp01 + DNp10 · Hz</span><output id="jumpValue">—</output></div><canvas id="jumpChart" role="img" aria-label="Jump rate, two hertz gate, jump request and observed A marks"></canvas></div>
+<div class="chart-row"><div class="chart-label"><strong>Stick sent → received</strong><span>solid: sent · dashed: game</span><output id="stickValue">—</output></div><canvas id="stickChart" role="img" aria-label="Requested and observed game stick axes, minus seventy to plus seventy"></canvas></div>
+<div class="ack"><strong id="gameState">Game: waiting</strong><span id="jumpState">A request is not proof Mario left the ground.</span></div>
+</section>
+<section aria-labelledby="brain-title">
+<div class="section-head"><h2 id="brain-title">Activity map</h2><label><select id="population" aria-label="Neuron population"><option value="all">All located neurons</option><option value="visual">Visual input · R1–R8</option><option value="forward">Forward · DNg100</option><option value="left">Left steering pool</option><option value="right">Right steering pool</option><option value="jump">Jump pool</option></select></label></div>
+<div class="brain-row"><div class="map"><canvas id="brain" aria-label="Stationary projection of measured neuron locations; brightness is rolling firing rate"></canvas><div class="legend"><span>0 Hz</span><i></i><span>50 Hz</span></div></div><div class="brain-note"><p id="populationRate">—</p><p id="populationInfo">Loading anatomy…</p><p class="muted">Fixed X/Y · dim points = context<br>Missing locations still simulated.</p></div></div>
+</section>
+<footer><p id="performance">Waiting for performance counters…</p><p>Measured wiring; modeled dynamics & controls. Activity ≠ intent.</p></footer>
+</main><script type="module" src="/dashboard.js"></script></body></html>
